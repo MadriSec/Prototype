@@ -20,7 +20,7 @@ EchoTrace performs a three-phase analysis:
 ### Quick Build
 ```bash
 # Navigate to the project directory
-cd EchoTrace/echotrace
+cd Prototype/
 
 # Run the build script
 ./build.sh
