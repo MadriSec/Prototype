@@ -74,8 +74,6 @@ Prototype/
 └── build.sh                 # Build script
 ```
 
-## Configuration
-
 
 
 
