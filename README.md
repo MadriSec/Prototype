@@ -101,7 +101,7 @@ Main class: com.example.app.MainApp
 ## Project Structure
 
 ```
-EchoTrace/echotrace/
+Prototype/
 ├── src/main/java/com/echotrace/app/bytecode_new/
 │   ├── MainApp.java          # Main orchestrator
 │   ├── Findmain.java         # Main method discovery
