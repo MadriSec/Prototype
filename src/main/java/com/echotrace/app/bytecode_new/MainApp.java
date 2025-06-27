@@ -82,5 +82,7 @@ public class MainApp {
         Dependencytree.main(new String[]{depsDir});
         System.out.println("\n==== Call Path from Main to Dependency ====");
         Printpath.main(new String[]{targetJar, depsDir});
+	PrintpathDFS.main(new String[]{targetJar, depsDir});
+
     }
 } 
