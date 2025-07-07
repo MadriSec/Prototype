@@ -1,0 +1,15 @@
+Native methods and paths found in: /home/rupesh.punna/Prototype/example/target/
+Dependencies: /home/rupesh.punna/Prototype/example/target/deps/
+
+=== Main Method 1: <com.example.app.ArraySetTest: void main(java.lang.String[])> ===
+Found 1 paths to 1 native methods:
+Path 1: <com.example.app.ArraySetTest: void main(java.lang.String[])> -> <java.lang.reflect.Array: void set(java.lang.Object,int,java.lang.Object)>
+
+=== Main Method 2: <com.example.app.ArrayNewInstanceTest: void main(java.lang.String[])> ===
+Found 1 paths to 1 native methods:
+Path 1: <com.example.app.ArrayNewInstanceTest: void main(java.lang.String[])> -> <java.lang.reflect.Array: java.lang.Object newInstance(java.lang.Class,int)> -> <java.lang.reflect.Array: java.lang.Object newArray(java.lang.Class,int)>
+
+=== Main Method 3: <com.example.app.ArrayGetTest: void main(java.lang.String[])> ===
+Found 1 paths to 1 native methods:
+Path 1: <com.example.app.ArrayGetTest: void main(java.lang.String[])> -> <java.lang.reflect.Array: java.lang.Object get(java.lang.Object,int)>
+
