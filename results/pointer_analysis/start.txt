@@ -1,0 +1,3 @@
+call_string_func
+call_size_func
+lib_init
