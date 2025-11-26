@@ -1,0 +1,3 @@
+[SUFFIX MATCH] 'dowork' -> 'willdowork'
+[SUFFIX MATCH] 'dowork' -> 'candowork'
+[SUFFIX MATCH] 'dowork' -> 'wontdowork'
