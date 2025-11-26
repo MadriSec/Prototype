@@ -49,14 +49,21 @@ env_lib_dirs = os.environ.get("LIB_DIRS")
 if env_lib_dirs:
     LIB_DIRS = [p for p in env_lib_dirs.split(os.pathsep) if p]
 else:
-    LIB_DIRS = [
-        "/home/rupesh.punna/Prototype/LIBS",
-        "/home/rupesh.punna/SWAT4J/",
-        "/home/rupesh.punna/SWAT4J/JNI_thirdparty/",
-        "/usr/lib/jvm/java-17-openjdk-amd64/lib",
-        "/usr/lib/jvm/java-8-openjdk-amd64/jre/lib/amd64/",
-        "/usr/lib/x86_64-linux-gnu/",
-    ]
+    # Prefer explicit image-scoped variable first, then LIBS_DIR
+    lib_base = os.environ.get("LIBS_IMAGE") or os.environ.get("LIBS_DIR")
+    if lib_base:
+        LIB_DIRS = [lib_base]
+    else:
+        LIB_DIRS = [
+            "/home/rupesh.punna/Prototype/LIBS_solr_slim",
+            "/usr/lib/jvm/java-17-openjdk-amd64/lib",
+            "/usr/lib/jvm/java-8-openjdk-amd64/jre/lib/amd64/",
+            "/usr/lib/x86_64-linux-gnu/",
+        ]
+
+print("DEBUG: Using LIB_DIRS:")
+for d in LIB_DIRS:
+    print("  -", d)
 
 # Optional: OpenJDK native source root to learn JNINativeMethod tables (no hardcoding).
 # If absent, we skip source-based mapping.
@@ -65,19 +72,58 @@ JVM_SRC = os.environ.get("JVM_SRC", "")
 # Optional: explicit path to libjvm.so. If not set, we discover it (preferring LIB_DIRS).
 JVM_SO = os.environ.get("JVM_SO", "")
 
+# Output directory (use OUTPUTS_DIR if set, otherwise current directory)
+output_dir = os.environ.get("OUTPUTS_DIR", ".").strip() or "."
+
+
+def resolve_methods_file():
+    env_methods = os.environ.get("METHODS_FILE")
+    if env_methods:
+        return env_methods
+    if output_dir not in (".", ""):
+        return os.path.join(output_dir, "formatted_methods.txt")
+    return "formatted_methods.txt"
+
+
+def ensure_methods_file(path: str):
+    if os.path.exists(path):
+        return
+    sys.stderr.write(
+        f"ERROR: Methods file not found: {path}\n"
+        "Set METHODS_FILE or OUTPUTS_DIR to point to an existing formatted_methods.txt.\n"
+    )
+    sys.exit(1)
+
+
 # Input list of Java methods (one per line): e.g., "java.lang.System.nanoTime"
-methods_file = os.environ.get("METHODS_FILE", "formatted_methods.txt")
+methods_file = resolve_methods_file()
+ensure_methods_file(methods_file)
 
 # Outputs
-detailed_output_file = "method_syscalls.txt"
-jni_only_output_file = "found_jni_methods.txt"
-jvm_only_output_file = "found_jvm_methods.txt"
-registered_only_output_file = "found_registered_methods.txt"
+detailed_output_file = os.path.join(output_dir, "method_syscalls.txt")
 
 # ----------------------------
 # Helpers
 # ----------------------------
 def is_elf(path: str) -> bool:
+    """
+    Purpose:
+        Check if a file is an ELF (Executable and Linkable Format) binary by examining
+        its magic number. ELF files include executables, shared libraries (.so), and
+        object files that may contain native symbols we need to scan.
+
+    Input:
+        path (str): File system path to the file to check.
+
+    Output:
+        bool: True if the file is an ELF binary (starts with 0x7fELF magic bytes),
+              False otherwise (file doesn't exist, can't be read, or isn't ELF).
+
+    Description:
+        Reads the first 4 bytes of the file and checks for the ELF magic signature
+        (0x7f followed by "ELF"). Returns False on any I/O errors or if the magic
+        bytes don't match.
+    """
     try:
         with open(path, "rb") as f:
             return f.read(4) == b"\x7fELF"
@@ -86,8 +132,45 @@ def is_elf(path: str) -> bool:
 
 def jni_to_java_method(jni_name: str):
     """
-    Convert JNI symbol "Java_pkg_Class_method" to "pkg.Class.method".
-    Handles _1 => '_' unescape.
+    Purpose:
+        Convert a JNI (Java Native Interface) symbol name to its corresponding
+        fully-qualified Java method name. JNI uses underscores to represent dots
+        in package and class names, with special escaping for literal underscores.
+        
+        WHY CONVERT JNI → JAVA (not the other way)?
+        
+        Example scenario:
+        - Input file has: "java.lang.System.nanoTime"
+        - Binary library has: "Java_java_lang_System_nanoTime"
+        
+        APPROACH 1 (What we do - FAST):
+        Step 1: Scan ALL binaries → find ["Java_java_lang_System_nanoTime", ...]
+        Step 2: Convert JNI→Java → {"java.lang.System.nanoTime": ("Java_java_lang_System_nanoTime", "lib.so")}
+        Step 3: For each input method, do fast dict lookup: if "java.lang.System.nanoTime" in dict → FOUND!
+        Result: O(1) lookup per method = FAST
+        
+        APPROACH 2 (Alternative - SLOW):
+        Step 1: For each input method "java.lang.System.nanoTime"
+        Step 2: Convert Java→JNI → "Java_java_lang_System_nanoTime"
+        Step 3: Search ALL binaries for this symbol (run nm on each .so file)
+        Result: O(n*m) where n=methods, m=libraries = SLOW!
+        
+        We choose Approach 1 because we scan binaries ONCE, then do fast lookups.
+
+    Input:
+        jni_name (str): JNI symbol name (e.g., "Java_java_lang_System_nanoTime"
+                        or "Java_java_util_Map_Entry_getKey").
+
+    Output:
+        str | None: The fully-qualified Java method name (e.g., "java.lang.System.nanoTime")
+                    if the input is a valid JNI symbol starting with "Java_", otherwise None.
+
+    Description:
+        JNI symbols follow the pattern "Java_<package>_<class>_<method>" where:
+        - Underscores represent dots in package/class names
+        - "_1" is the escape sequence for a literal underscore character
+        - The function strips the "Java_" prefix, unescapes "_1" to "_", then
+          replaces remaining underscores with dots to reconstruct the Java method name.
     """
     if not jni_name.startswith("Java_"):
         return None
@@ -96,10 +179,28 @@ def jni_to_java_method(jni_name: str):
 
 def load_defined_symbols(so_path: str, pattern: str):
     """
-    Return a set of symbol names matching `pattern` from `nm -D --defined-only so_path`.
-    Notes:
-      - `-D` limits to dynamic symbols; `--defined-only` excludes undefined refs.
-      - `pattern` is a regex applied to each nm output line.
+    Purpose:
+        Extract symbol names from an ELF shared library that match a given regex pattern.
+        Only returns symbols that are actually defined in the library (not external references),
+        which is essential for identifying which library owns a particular native function.
+
+    Input:
+        so_path (str): Path to the ELF shared library (.so file) to scan.
+        pattern (str): Regular expression pattern to match against symbol names.
+                      Examples: r"\\bJava_[A-Za-z0-9_]+\\b" for JNI symbols,
+                               r"\\bJVM_[A-Za-z0-9_]+\\b" for JVM internal symbols.
+
+    Output:
+        set[str]: Set of symbol names that match the pattern and are defined in the library.
+                  Returns an empty set if the library can't be read or nm fails.
+
+    Description:
+        Uses the `nm` (name list) tool with flags:
+        - `-D`: Only show dynamic symbols (exported symbols used at runtime)
+        - `--defined-only`: Exclude undefined references (only symbols defined in this library)
+        The regex pattern is applied to each line of nm output, and matching symbol names
+        are collected into a set. This is used to discover JNI functions, JVM_* functions,
+        and other native symbols exported by libraries.
     """
     try:
         out = subprocess.check_output(
@@ -120,10 +221,29 @@ def load_defined_symbols(so_path: str, pattern: str):
 
 def ldd_paths(binary_path: str) -> list[str]:
     """
-    Return absolute dependency library paths reported by `ldd binary_path`.
-    Why:
-      - Many target symbols live in transitive deps; we expand the search set so
-        `resolve_symbol_in_libs` can locate owners reliably.
+    Purpose:
+        Discover all shared library dependencies of a binary by running `ldd` (list dynamic
+        dependencies). This is crucial because many native symbols are defined in transitive
+        dependencies rather than the main library, and we need to expand our search scope
+        to find symbol owners.
+
+    Input:
+        binary_path (str): Path to an ELF binary (executable or shared library) whose
+                          dependencies should be discovered.
+
+    Output:
+        list[str]: List of absolute file paths to dependency libraries (.so files) that
+                   the binary depends on. Returns an empty list if ldd fails or the binary
+                   doesn't exist.
+
+    Description:
+        Executes `ldd` to list dynamic library dependencies. Parses the output to extract
+        absolute paths to dependency libraries. Handles two output formats:
+        - "lib => /path/to/lib.so" (with arrow)
+        - "/path/to/lib.so" (direct path)
+        Only includes paths that exist, are absolute (start with "/"), and are valid ELF files.
+        This transitive dependency discovery is essential because symbols registered in source
+        code may be implemented in any dependency, not just the main library.
     """
     try:
         out = subprocess.check_output(["ldd", binary_path], universal_newlines=True, stderr=subprocess.DEVNULL)
@@ -145,10 +265,33 @@ def ldd_paths(binary_path: str) -> list[str]:
 
 def collect_search_libs(seed_libs: list[str], extra_dirs: list[str]) -> list[str]:
     """
-    Build a list of ELF libraries to scan for symbols by combining:
-      - seed_libs and all of their transitive ldd-discovered dependencies; and
-      - every `lib*.so*` ELF in `extra_dirs`.
-    This ensures symbol resolution covers direct and indirect runtime libs.
+    Purpose:
+        Build a comprehensive list of ELF libraries to search for symbol definitions.
+        Combines seed libraries with all their transitive dependencies (via ldd) and
+        all libraries found in additional directories. This ensures symbol resolution
+        covers both direct libraries and all their runtime dependencies.
+
+    Input:
+        seed_libs (list[str]): List of key library paths to start with (e.g., libjvm.so,
+                              libjava.so). These and all their dependencies will be included.
+        extra_dirs (list[str]): Additional directories to scan for libraries matching
+                               the pattern "lib*.so*".
+
+    Output:
+        list[str]: Complete list of unique ELF library paths to search, including:
+                  - All seed libraries (if they're ELF files)
+                  - All transitive dependencies of seed libraries (via ldd)
+                  - All libraries found in extra_dirs matching "lib*.so*"
+
+    Description:
+        Uses a queue-based breadth-first traversal to collect libraries:
+        1. Starts with seed_libs (e.g., libjvm.so) and adds them to the search set
+        2. For each library, uses `ldd_paths()` to discover its dependencies
+        3. Recursively adds dependencies to the queue until all are discovered
+        4. Scans extra_dirs for any additional libraries matching "lib*.so*"
+        5. Returns a deduplicated list of all ELF libraries found
+        This comprehensive search set is used by `resolve_symbol_in_libs()` to locate
+        which library actually defines a given symbol.
     """
     seen = set()
     out = []
@@ -175,10 +318,29 @@ def collect_search_libs(seed_libs: list[str], extra_dirs: list[str]) -> list[str
 
 def resolve_symbol_in_libs(symbol: str, libs: list[str]) -> str | None:
     """
-    Find the library that DEFINES `symbol` by invoking `nm -D --defined-only` on
-    each candidate. Returns the path of the owning `.so`, or None if not found.
-    Typical usage: resolve registered (non-`JVM_*`) targets discovered from source
-    tables to a concrete library for reporting.
+    Purpose:
+        Find which library in a collection actually defines a given symbol. This is
+        used to resolve registered native functions (discovered from source code) to
+        their actual implementation library, since the source code tells us the function
+        name but not which .so file contains it.
+
+    Input:
+        symbol (str): The name of the symbol to search for (e.g., "JVM_NanoTime",
+                     "RegisterNatives", or any C function name).
+        libs (list[str]): List of library paths to search through. Typically this is
+                         the comprehensive list from `collect_search_libs()`.
+
+    Output:
+        str | None: The path to the first library that defines the symbol, or None
+                   if the symbol is not found in any of the provided libraries.
+
+    Description:
+        Searches through the provided libraries using `nm -D --defined-only` to check
+        if each library defines the target symbol. Uses word-boundary regex matching
+        to avoid false positives (e.g., matching "JVM_Time" when searching for "JVM_T").
+        Returns the first library that contains the symbol definition. This is critical
+        for methods discovered from OpenJDK source code JNINativeMethod tables, which
+        reference C functions that may be in libjvm.so, libjava.so, or other dependencies.
     """
     rx = re.compile(rf"\b{re.escape(symbol)}\b")
     for so in libs:
@@ -193,11 +355,31 @@ def resolve_symbol_in_libs(symbol: str, libs: list[str]) -> str | None:
 
 def build_netty_map(lib_paths):
     """
-    Build a best-effort mapping for Netty native methods which use custom
-    `netty_*` symbol names instead of standard `Java_*` JNI names. Examples:
-      - netty_unix_socket_getOption   -> io.netty.channel.unix.Socket.getOption
-      - netty_epoll_linuxsocket_bindVSock -> io.netty.channel.epoll.LinuxSocket.bindVSock
-    Implementation detail: uses plain `nm` (not `-D`) to include local symbols too.
+    Purpose:
+        Build a mapping from Java Netty methods to their native symbol names.
+        Netty uses custom `netty_*` symbol naming conventions instead of standard
+        JNI `Java_*` naming, so we need special parsing logic to connect Java methods
+        to their native implementations.
+
+    Input:
+        lib_paths (list[str]): List of library file paths to scan for Netty symbols.
+                              Only libraries with "netty" in their filename are processed.
+
+    Output:
+        dict[str, tuple[str, str]]: Dictionary mapping fully-qualified Java method names
+                                    to tuples of (native_symbol, library_path).
+                                    Example: {"io.netty.channel.unix.Socket.getOption":
+                                             ("netty_unix_socket_getOption", "/path/to/lib.so")}
+
+    Description:
+        Scans Netty libraries for symbols starting with "netty_" and attempts to
+        reconstruct the corresponding Java method name using pattern matching:
+        - netty_unix_socket_getOption -> io.netty.channel.unix.Socket.getOption
+        - netty_epoll_linuxsocket_bindVSock -> io.netty.channel.epoll.LinuxSocket.bindVSock
+        Uses regular `nm` (not `-D`) to include local symbols that may not be exported.
+        Handles special cases like "linuxsocket" -> "LinuxSocket" for proper class naming.
+        This mapping is used later to match Java methods from the input list to their
+        native Netty implementations.
     """
     netty_map = {}
     
@@ -258,9 +440,29 @@ def build_netty_map(lib_paths):
 
 def match_netty_method(method, netty_symbols):
     """
-    Fuzzy matcher to associate a Java Netty method with a plausible `netty_*`
-    symbol when an exact entry is not constructed in `build_netty_map`.
-    Tries context-aware and suffix-based heuristics.
+    Purpose:
+        Perform fuzzy matching to associate a Java Netty method with a native `netty_*`
+        symbol when an exact mapping wasn't found in `build_netty_map()`. This handles
+        cases where the symbol naming pattern doesn't perfectly match our reconstruction
+        logic, or when methods have slightly different naming conventions.
+
+    Input:
+        method (str): Fully-qualified Java method name (e.g., "io.netty.channel.epoll.LinuxSocket.bind").
+        netty_symbols (dict): Dictionary from `build_netty_map()` mapping Java methods to
+                             (symbol, library_path) tuples.
+
+    Output:
+        tuple[str, str] | None: Tuple of (native_symbol, library_path) if a match is found,
+                               None if no plausible match can be determined.
+
+    Description:
+        Uses heuristics to find matching symbols:
+        1. Extracts package context (epoll, unix) and class/method names from the Java method
+        2. Constructs candidate symbol patterns (e.g., "netty_epoll_linuxsocket_bind")
+        3. Searches for symbols containing these patterns (case-insensitive)
+        4. Falls back to suffix matching (matches if symbol ends with the method name)
+        This helps catch Netty methods that don't follow the exact patterns handled by
+        `build_netty_map()`, improving the coverage of native method resolution.
     """
     if not method.startswith("io.netty"):
         return None
@@ -311,6 +513,30 @@ for lib_dir in LIB_DIRS:
             so_paths.append(p)
 
 def find_libjvm() -> str | None:
+    """
+    Purpose:
+        Locate the libjvm.so library file, which contains the Java Virtual Machine
+        implementation and many core native methods (JVM_* functions). This library
+        is essential for validating JVM_* symbols discovered from source code.
+
+    Input:
+        None (uses module-level variables JVM_SO and LIB_DIRS, and environment variables).
+
+    Output:
+        str | None: Absolute path to libjvm.so if found, None if the library cannot
+                   be located. The library must exist and be a valid ELF file.
+
+    Description:
+        Searches for libjvm.so in the following order (first match wins):
+        1. Explicit override: If JVM_SO environment variable is set and points to a valid file
+        2. LIB_DIRS: Search recursively in directories specified in LIB_DIRS
+        3. JAVA_HOME: Search in JAVA_HOME/lib/server/libjvm.so and recursively
+        4. System paths: Search in /usr/lib/jvm/**/lib/server/libjvm.so and variants
+        All candidates are validated to ensure they exist and are ELF binaries.
+        This library is critical because it contains JVM_* functions that many core
+        Java methods (like System.nanoTime) map to, and we need to validate these
+        symbols actually exist in the library.
+    """
     # 1) explicit override
     if JVM_SO and os.path.isfile(JVM_SO):
         return JVM_SO
@@ -347,13 +573,29 @@ else:
 # ----------------------------
 # Step 1: JNI mapping (Java_*)
 # ----------------------------
+# WORKFLOW EXPLANATION:
+# 1. We scan binary libraries (.so files) and find JNI symbols like:
+#    - "Java_java_lang_System_nanoTime"  (found in lib.so)
+#    - "Java_java_lang_String_length"    (found in lib.so)
+#
+# 2. We convert these JNI symbols → Java method names:
+#    - "Java_java_lang_System_nanoTime" → "java.lang.System.nanoTime"
+#    - "Java_java_lang_String_length" → "java.lang.String.length"
+#
+# 3. We build a dictionary: method_to_jni["java.lang.System.nanoTime"] = ("Java_java_lang_System_nanoTime", "/path/to/lib.so")
+#
+# 4. Later, when we read methods from input file (like "java.lang.System.nanoTime"),
+#    we can do a FAST dictionary lookup: if method in method_to_jni → found it!
+#
+# Why not convert Java→JNI? Because we'd need to search ALL binaries for EACH method
+# in the input file, which is slow. This way we scan binaries once, then do fast lookups.
 method_to_jni: dict[str, tuple[str, str]] = {}
 for so_path in so_paths:
     out_syms = load_defined_symbols(so_path, r"\bJava_[A-Za-z0-9_]+\b")
     for jni in out_syms:
-        m = jni_to_java_method(jni)
+        m = jni_to_java_method(jni)  # Convert: "Java_java_lang_System_nanoTime" → "java.lang.System.nanoTime"
         if m and m not in method_to_jni:
-            method_to_jni[m] = (jni, so_path)
+            method_to_jni[m] = (jni, so_path)  # Store: "java.lang.System.nanoTime" → ("Java_java_lang_System_nanoTime", "/path/lib.so")
 
 # ----------------------------
 # Step 1.5: Netty mapping (netty_*)
@@ -378,11 +620,31 @@ else:
 # ----------------------------
 def infer_java_class_from_path(filepath: str) -> str | None:
     """
-    Map native filenames to fully-qualified classes:
-      java_lang_Class.c                -> java.lang.Class
-      java_lang_reflect_Array.c        -> java.lang.reflect.Array
-      jdk_internal_misc_Unsafe.c       -> jdk.internal.misc.Unsafe
-      .../java/lang/Class.c            -> java.lang.Class
+    Purpose:
+        Infer the fully-qualified Java class name from a native source file path.
+        OpenJDK native files use naming conventions that reflect the Java package structure,
+        and we need to map these back to Java class names to associate native methods
+        with their Java counterparts.
+
+    Input:
+        filepath (str): Path to a native source file (e.g., "java_lang_Class.c" or
+                       "/path/to/java/lang/Class.c" or "jdk_internal_misc_Unsafe.c").
+
+    Output:
+        str | None: Fully-qualified Java class name (e.g., "java.lang.Class",
+                   "jdk.internal.misc.Unsafe") if the pattern can be inferred,
+                   None if the filename doesn't match known conventions.
+
+    Description:
+        Tries multiple strategies to infer the class name:
+        1. Filename pattern: "java_lang_Class.c" -> "java.lang.Class"
+           Uses regex to match "java|jdk" prefix, package part (underscores), and class name
+        2. Directory structure: ".../java/lang/Class.c" -> "java.lang.Class"
+           Extracts package and class from directory path components
+        3. Content-based: Searches file content for Java class references
+        This is used when parsing OpenJDK source files to associate JNINativeMethod
+        table entries with their corresponding Java classes, since the source files
+        don't always explicitly name the class.
     """
     path = filepath.replace("\\", "/")
     base = os.path.splitext(os.path.basename(path))[0]
@@ -418,12 +680,32 @@ def infer_java_class_from_path(filepath: str) -> str | None:
 
 def scan_native_tables(src_root: str):
     """
-    Parse OpenJDK native sources to reconstruct `JNINativeMethod` table mappings.
-    Returns two dicts:
-      - jvm_map: "pkg.Class.method" -> "JVM_*" target
-      - reg_map: "pkg.Class.method" -> non-`JVM_*` C function (registered native)
-    Rationale: not all natives use `Java_*`; many core methods register to `JVM_*`
-    or other C functions at startup and are invisible to pure binary scanning.
+    Purpose:
+        Parse OpenJDK source code to extract JNINativeMethod registration tables that
+        map Java methods to their native C function implementations. This is essential
+        because many core Java methods (like System.nanoTime) don't use standard JNI
+        naming and instead register at runtime with C functions like JVM_* or custom names.
+
+    Input:
+        src_root (str): Root directory of the OpenJDK source tree to scan. Should contain
+                       native source files (.c, .cc, .cpp, .cxx) with JNINativeMethod tables.
+
+    Output:
+        tuple[dict, dict]: Two dictionaries:
+          - jvm_map (dict[str, str]): Maps "pkg.Class.method" -> "JVM_*" symbol name
+                                     (e.g., "java.lang.System.nanoTime" -> "JVM_NanoTime")
+          - reg_map (dict[str, str]): Maps "pkg.Class.method" -> non-JVM_* C function name
+                                     (e.g., registered natives that use custom function names)
+
+    Description:
+        Recursively walks through the source tree, scanning all C/C++ files for
+        JNINativeMethod table entries. These tables have the format:
+          { "methodName", "signature", (void*)&FunctionName }
+        Uses `infer_java_class_from_path()` to determine which Java class each file
+        corresponds to. Separates JVM_* functions (implemented in libjvm.so) from
+        other registered natives (which may be in libjava.so or other libraries).
+        This source-based mapping complements binary symbol scanning by revealing
+        methods that are registered at runtime and not visible through static analysis.
     """
     jvm_map, reg_map = {}, {}
     if not src_root or not os.path.isdir(src_root):
@@ -507,24 +789,20 @@ with open(methods_file, "r", encoding="utf-8") as f:
 # ----------------------------
 # Step 5: Classify each method
 # ----------------------------
-found_jni_symbols = set()
-found_jvm_symbols = set()
-found_registered_symbols = set()
-
 with open(detailed_output_file, "w", encoding="utf-8") as out:
-    for method in methods:
+    for method in methods:  # e.g., "java.lang.System.nanoTime" from input file
         # 1) JNI (Java_*) direct hits from binaries
-        if method in method_to_jni:
-            jni_sym, so_path = method_to_jni[method]
+        # FAST LOOKUP: Check if this Java method exists in our dictionary
+        # (which we built by converting JNI symbols → Java method names)
+        if method in method_to_jni:  # Dictionary lookup: O(1) - very fast!
+            jni_sym, so_path = method_to_jni[method]  # Get: ("Java_java_lang_System_nanoTime", "/path/lib.so")
             out.write(f"{os.path.basename(so_path)}:{method} -> {jni_sym} [JNI]\n")
-            found_jni_symbols.add(jni_sym)
             continue
 
         # 1.5) Check Netty-specific mappings
         if method in netty_method_map:
             netty_sym, so_path = netty_method_map[method]
             out.write(f"{os.path.basename(so_path)}:{method} -> {netty_sym} [NETTY]\n")
-            found_jni_symbols.add(netty_sym)  # Add to JNI symbols for simplicity
             continue
 
         # 1.6) Try fuzzy Netty matching
@@ -533,7 +811,6 @@ with open(detailed_output_file, "w", encoding="utf-8") as out:
             if result:
                 netty_sym, so_path = result
                 out.write(f"{os.path.basename(so_path)}:{method} -> {netty_sym} [NETTY_FUZZY]\n")
-                found_jni_symbols.add(netty_sym)
                 continue
 
         # 2) JVM_* via source tables
@@ -542,8 +819,6 @@ with open(detailed_output_file, "w", encoding="utf-8") as out:
             tag = "JVM"
             if libjvm_so and (jvm_sym not in available_jvm_symbols):
                 tag = "JVM? NOT_IN_THIS_LIB"
-            else:
-                found_jvm_symbols.add(jvm_sym)
             out.write(f"libjvm.so:{method} -> {jvm_sym} [{tag}]\n")
             continue
 
@@ -553,7 +828,6 @@ with open(detailed_output_file, "w", encoding="utf-8") as out:
             owner = resolve_symbol_in_libs(reg_sym, search_libs)
             if owner:
                 out.write(f"{os.path.basename(owner)}:{method} -> {reg_sym} [REGISTERED]\n")
-                found_registered_symbols.add(reg_sym)
             else:
                 out.write(f"{method} -> {reg_sym} [REGISTERED? UNRESOLVED]\n")
             continue
@@ -561,23 +835,5 @@ with open(detailed_output_file, "w", encoding="utf-8") as out:
         # 4) Unknown (pure Java or unobserved registration)
         out.write(f"{method}: NOT_FOUND_IN_LIBS\n")
 
-# ----------------------------
-# Step 6: Write symbol lists
-# ----------------------------
-with open(jni_only_output_file, "w", encoding="utf-8") as jf:
-    for sym in sorted(found_jni_symbols):
-        jf.write(sym + "\n")
-
-with open(jvm_only_output_file, "w", encoding="utf-8") as jf:
-    for sym in sorted(found_jvm_symbols):
-        jf.write(sym + "\n")
-
-with open(registered_only_output_file, "w", encoding="utf-8") as jf:
-    for sym in sorted(found_registered_symbols):
-        jf.write(sym + "\n")
-
 print(f"Done!")
 print(f"- Detailed results: {detailed_output_file}")
-print(f"- JNI-only list:   {jni_only_output_file}")
-print(f"- JVM-only list:   {jvm_only_output_file}")
-print(f"- Registered list: {registered_only_output_file}")
