@@ -32,12 +32,12 @@ __condvar_cleanup_waiting 93720 module-libc.so.6 futex 202
 __condvar_cleanup_waiting 93720 module-libc.so.6 futex 202
 create_thread 945e0 module-libc.so.6 sched_setaffinity 203
 create_thread 945e0 module-libc.so.6 sched_setscheduler 144
+start_thread 947d0 module-libc.so.6 futex 202
+start_thread 947d0 module-libc.so.6 set_robust_list 273
 start_thread 947d0 module-libc.so.6 rt_sigprocmask 14
 start_thread 947d0 module-libc.so.6 rt_sigprocmask 14
 start_thread 947d0 module-libc.so.6 exit 60
-start_thread 947d0 module-libc.so.6 set_robust_list 273
 start_thread 947d0 module-libc.so.6 rseq 334
-start_thread 947d0 module-libc.so.6 futex 202
 start_thread 947d0 module-libc.so.6 futex 202
 __pthread_mutex_cond_lock_full 96a50 module-libc.so.6 futex 202
 __pthread_mutex_cond_lock_full 96a50 module-libc.so.6 futex 202

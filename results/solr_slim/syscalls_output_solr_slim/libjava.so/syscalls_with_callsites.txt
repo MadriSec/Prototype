@@ -32,8 +32,8 @@ __condvar_cleanup_waiting 93720 module-libc.so.6 futex 202
 __condvar_cleanup_waiting 93720 module-libc.so.6 futex 202
 create_thread 945e0 module-libc.so.6 sched_setaffinity 203
 create_thread 945e0 module-libc.so.6 sched_setscheduler 144
-start_thread 947d0 module-libc.so.6 futex 202
 start_thread 947d0 module-libc.so.6 set_robust_list 273
+start_thread 947d0 module-libc.so.6 futex 202
 start_thread 947d0 module-libc.so.6 rseq 334
 start_thread 947d0 module-libc.so.6 exit 60
 start_thread 947d0 module-libc.so.6 rt_sigprocmask 14
@@ -113,11 +113,11 @@ __openat_nocancel 119af0 module-libc.so.6 openat 257
 _dl_sym 175850 module-libc.so.6 futex 202
 _dl_vsym 175430 module-libc.so.6 futex 202
 __compat_get_kernel_syms 126c10 module-libc.so.6 get_kernel_syms 177
-__pthread_kill_internal 96770 module-libc.so.6 tgkill 234
 __pthread_kill_internal 96770 module-libc.so.6 gettid 186
 __pthread_kill_internal 96770 module-libc.so.6 tgkill 234
 __pthread_kill_internal 96770 module-libc.so.6 rt_sigprocmask 14
 __pthread_kill_internal 96770 module-libc.so.6 rt_sigprocmask 14
+__pthread_kill_internal 96770 module-libc.so.6 tgkill 234
 __lll_lock_wake 91320 module-libc.so.6 futex 202
 __lll_lock_wait 91290 module-libc.so.6 futex 202
 clone3 126890 module-libc.so.6 exit 60

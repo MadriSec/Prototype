@@ -1,4 +1,5 @@
 bash
 /bin/bash
+runc
 tini
 /usr/bin/env
