@@ -23,7 +23,7 @@ static libc_func2_t func_array2[] = {
 };
 
 // Constructor - runs automatically when library is loaded
-// Modified to use write syscall instead of printf
+
 __attribute__((constructor))
 static void lib_init(void) {
         const char* msg = "Library initialized\n";
