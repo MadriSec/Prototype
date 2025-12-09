@@ -1,5 +1,5 @@
 package com.echotrace.app.bytecode_new;
-
+// sootup imports
 import sootup.core.inputlocation.AnalysisInputLocation;
 import sootup.java.bytecode.frontend.inputlocation.JavaClassPathAnalysisInputLocation;
 import sootup.java.bytecode.frontend.inputlocation.DefaultRuntimeAnalysisInputLocation;
@@ -23,109 +23,75 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.jar.JarFile;
 import java.util.jar.JarEntry;
-import java.util.stream.Collectors;
-import java.util.Comparator;
 
 /**
- * Unified Native Method Tracer - Merges PrintpathDFS and HybridByteCodeTracer
- * 
+ * Native Method Tracer - ASM and SootUp Based Analysis
+ *
  * This class provides comprehensive analysis of native method usage in Java applications.
- * It combines static analysis techniques using Soot framework and ASM bytecode analysis
- * to trace native method calls and their execution paths.
- * 
+ * It provides two analysis approaches: ASM-based bytecode analysis and SootUp-based
+ * Jimple analysis to trace native method calls and their execution paths.
+ *
  * USAGE:
- *   java PrototypeFinal <target-directory> <dependencies-directory> [--1|--2|--3|--5|--6]
+ *   java PrototypeFinal <target-directory> <dependencies-directory> [--1|--2]
  *
  * INPUT REQUIREMENTS:
  *   - target-directory: Directory containing application JAR files to analyze
  *   - dependencies-directory: Directory containing dependency JAR files
- *   - mode (optional): Analysis mode selector (--1 to --3, --5, --6)
+ *   - mode: Analysis mode selector (--1 or --2)
  *
  * ANALYSIS MODES:
- *   --1 (default): Trace from main methods only; emit paths to reachable native methods.
- *                  Use case: Find native methods called during application startup
- *   --2: Scan all classes to list every native method in target+deps, and separately
- *        identify JRE natives reachable from main.
- *        Use case: Comprehensive inventory of all native methods in codebase
- *   --3: Use ALL methods in target JARs as entry points (not just main) and trace.
- *        Use case: Find all possible native method calls from any target method
- *   --4: Use HybridByteCodeTracer approach (ASM-based native method detection).
+ *   --1: Use HybridByteCodeTracer approach (ASM-based native method detection).
  *        Use case: Bytecode-level analysis using ASM framework
- *   --5: SootUp Visitor Pattern (Worklist-based like Mode 4, using Jimple instead of ASM).
+ *   --2 (default): SootUp Visitor Pattern (Worklist-based, using Jimple instead of ASM).
+ *        Use case: Jimple-based analysis with comprehensive call chain tracking
  *
- * 
  * OUTPUT FILES:
- *   - unique_native_methods.txt: List of unique native methods found
- *   - native_methods_with_paths.txt: Native methods with call paths
- *   - deps_called_by_target.txt: Dependency classes called by target code
- *   - all_target_dep_natives.txt: All native methods in target and dependencies
- *   - jre_used_natives.txt: JRE native methods actually used
- *   - native_methods_by_package.txt: Native methods organized by package
- *   - elasticsearch_hybrid.txt: Results from hybrid bytecode tracer (mode 4)
- *   - sootup_visitor_natives.txt: Results from SootUp visitor pattern (mode 5)
+ *   - native_methods.txt: Results from hybrid bytecode tracer (mode 1)
+ *   - sootup_visitor_natives.txt: Results from SootUp visitor pattern (mode 2)
+ *   - mode2_callgraph.txt: Call graph with native method callers (mode 2)
+ *   - mode2_callchains.txt: Complete call chains to natives (mode 2)
  */
 public class PrototypeFinal {
-    // PrintpathDFS fields
+    // Shared fields
     private static final Map<String, String> classToJar = new HashMap<>();
-    private static final Set<String> usedDepClasses = new HashSet<>();
-    private static final Set<MethodSignature> allTargetDepNativeMethods = new HashSet<>();
-    private static final Set<MethodSignature> jreUsedNativeMethods = new HashSet<>();
-    private static final Set<MethodSignature> visited = new HashSet<>();
-    private static final List<List<MethodSignature>> nativePaths = new ArrayList<>();
-    private static final Set<MethodSignature> foundNative = new HashSet<>();
-    private static JavaView view;
     private static Set<String> targetJarClasses = new HashSet<>();
     private static Set<String> dependencyClasses = new HashSet<>();
-    private static final Set<MethodSignature> allUniqueNativeMethods = new HashSet<>();
 
-    // Call graph structure: caller -> set of callees
-    private static final Map<String, Set<String>> callGraph = new HashMap<>();
-
-    // HybridByteCodeTracer fields
+    // HybridByteCodeTracer fields (Mode 1)
     private static String pathPrefix = "/home/rupesh.punna/Prototype/JARFILES/";
-    private static final String FALLBACK_NATIVE_FILE = "/home/rupesh.punna/Prototype/elasticsearch_hybrid.txt";
-    private static final String FALLBACK_FORMATTED_METHODS_FILE = "/home/rupesh.punna/Prototype/formatted_methods.txt";
+    private static final String NATIVE_METHODS_FILE = "/home/rupesh.punna/Prototype/native_methods.txt";
 
     /**
-     * Main entry point for the Unified Native Method Tracer
-     * 
+     * Main entry point for the Native Method Tracer
+     *
      * FUNCTION NAME: main
-     * 
+     *
      * USAGE:
-     *   java PrototypeFinal <target-directory> <dependencies-directory> [--1|--2|--3|--4|--5]
+     *   java PrototypeFinal <target-directory> <dependencies-directory> [--1|--2]
      *
      * INPUT REQUIRED:
      *   - args[0]: target-directory - Directory containing application JAR files
      *   - args[1]: dependencies-directory - Directory containing dependency JAR files
-     *   - args[2]: mode (optional) - Analysis mode selector (--1 to --5)
-     * 
+     *   - args[2]: mode (optional) - Analysis mode selector (--1 or --2, default: --2)
+     *
      * WHAT IT'S USED FOR:
-     *   - Orchestrates the entire native method analysis workflow
+     *   - Orchestrates the native method analysis workflow
      *   - Parses command line arguments and validates input
      *   - Selects appropriate analysis mode based on user input
-     *   - Loads JAR files and builds classpath for analysis
      *   - Executes the chosen analysis strategy
      *   - Generates comprehensive output files with results
-     * 
+     *
      * PROCESS FLOW:
      *   1. Parse and validate command line arguments
-     *   2. Determine analysis mode (--1 to --5)
-     *   3. Load JAR files from target and dependencies directories
-     *   4. Build Soot analysis environment with classpath
-     *   5. Execute mode-specific analysis logic
-     *   6. Generate output files with results
+     *   2. Determine analysis mode (--1 or --2)
+     *   3. Execute mode-specific analysis logic
+     *   4. Generate output files with results
      */
     public static void main(String[] args) {
-        // Parse CLI, configure analysis inputs (target + deps + runtime), then run
-        // either DFS-based tracing (modes 1/3), combined scanning (mode 2),
-        // HybridByteCodeTracer approach (mode 4), or SootUp Visitor Pattern (mode 5).
         if (args.length < 2) {
-            System.err.println("Usage: java PrototypeFinal <target-directory> <dependencies-directory> [--1|--2|--3|--4|--5]");
-            System.err.println("  --1: Only include native methods called by main methods (with paths)");
-            System.err.println("  --2: Include all native methods present in target+deps JARs + JRE natives from main");
-            System.err.println("  --3: Use all target methods as entry points (not just main)");
-            System.err.println("  --4: Use HybridByteCodeTracer approach (ASM-based native detection)");
-            System.err.println("  --5: SootUp Visitor Pattern (Worklist-based, Jimple analysis)");
+            System.err.println("Usage: java PrototypeFinal <target-directory> <dependencies-directory> [--1|--2]");
+            System.err.println("  --1: Use HybridByteCodeTracer approach (ASM-based native detection)");
+            System.err.println("  --2: SootUp Visitor Pattern (Worklist-based, Jimple analysis) [DEFAULT]");
             return;
         }
 
@@ -133,56 +99,32 @@ public class PrototypeFinal {
         String depsDir = args[1];
 
         // Parse mode argument
-        boolean onlyMainCalled = false;
-        boolean includeAllNative = false;
-        boolean allTargetMethods = false;
         boolean hybridByteCodeTracer = false;
         boolean sootupVisitorPattern = false;
-        boolean generateDetailedLogs = false;
 
         if (args.length >= 3) {
             if ("--1".equals(args[2])) {
-                onlyMainCalled = true;
-                System.out.println("Mode: Only native methods called by main methods");
-            } else if ("--2".equals(args[2])) {
-                includeAllNative = true;
-                System.out.println("Mode: All native methods in target+deps JARs + JRE natives from main");
-            } else if ("--3".equals(args[2])) {
-                allTargetMethods = true;
-                System.out.println("Mode: All methods in target JARs as entry points");
-            } else if ("--4".equals(args[2])) {
                 hybridByteCodeTracer = true;
-                System.out.println("Mode: HybridByteCodeTracer approach (ASM-based)");
-            } else if ("--5".equals(args[2])) {
+                System.out.println("Mode 1: HybridByteCodeTracer approach (ASM-based)");
+            } else if ("--2".equals(args[2])) {
                 sootupVisitorPattern = true;
-                System.out.println("Mode: SootUp Visitor Pattern (Worklist-based)");
+                System.out.println("Mode 2: SootUp Visitor Pattern (Worklist-based)");
             } else {
-                System.err.println("Invalid mode. Use --1, --2, --3, --4, or --5");
+                System.err.println("Invalid mode. Use --1 or --2");
                 return;
             }
         } else {
-            onlyMainCalled = true;
-            System.out.println("Mode: Only native methods called by main methods (default)");
+            sootupVisitorPattern = true;
+            System.out.println("Mode 2: SootUp Visitor Pattern (Worklist-based) [DEFAULT]");
         }
 
-        // Check for --log flag (can be args[3] or args[4])
-        for (int i = 2; i < args.length; i++) {
-            if ("--log".equals(args[i])) {
-                generateDetailedLogs = true;
-                System.out.println("Detailed logging enabled: Will generate call graph and call chains");
-                break;
-            }
-        }
-
-        System.out.println("=== PrototypeFinal: Unified Native Method Tracer ===");
+        System.out.println("=== PrototypeFinal: Native Method Tracer ===");
         System.out.println("Analyzing target directory: " + targetDir);
         System.out.println("Dependencies directory: " + depsDir);
 
-        ensureFormattedMethodsFile();
-
-        // Mode 4: HybridByteCodeTracer approach
+        // Mode 1: HybridByteCodeTracer approach
         if (hybridByteCodeTracer) {
-            System.out.println("\n=== Mode 4: HybridByteCodeTracer Approach ===");
+            System.out.println("\n=== Mode 1: HybridByteCodeTracer Approach ===");
             try {
                 runHybridByteCodeTracer(targetDir, depsDir);
             } catch (Exception e) {
@@ -192,9 +134,9 @@ public class PrototypeFinal {
             return;
         }
 
-        // Mode 5: SootUp Visitor Pattern (Worklist-based)
+        // Mode 2: SootUp Visitor Pattern (Worklist-based)
         if (sootupVisitorPattern) {
-            System.out.println("\n=== Mode 5: SootUp Visitor Pattern (Worklist) ===");
+            System.out.println("\n=== Mode 2: SootUp Visitor Pattern (Worklist) ===");
             try {
                 runSootUpVisitorPattern(targetDir, depsDir);
             } catch (Exception e) {
@@ -203,178 +145,7 @@ public class PrototypeFinal {
             }
             return;
         }
-
-        // Modes 1, 2, 3: Original PrintpathDFS logic
-        // 1) Load JARs from target and dependencies; index class -> jar path
-        List<String> targetJars = loadJarsFromDirectory(targetDir, targetJarClasses, classToJar, "target");
-        List<String> depJars = loadJarsFromDirectory(depsDir, dependencyClasses, classToJar, "dependency");
-
-        List<AnalysisInputLocation> inputs = new ArrayList<>();
-        for (String jar : targetJars) inputs.add(new JavaClassPathAnalysisInputLocation(jar));
-        for (String depJar : depJars) inputs.add(new JavaClassPathAnalysisInputLocation(depJar));
-        inputs.add(new DefaultRuntimeAnalysisInputLocation());
-        view = new JavaView(inputs);
-
-        System.out.println("Target JARs contain " + targetJarClasses.size() + " classes");
-        System.out.println("Dependencies contain " + dependencyClasses.size() + " classes");
-
-        // 3) Find entry point methods in target JARs (main only for mode 1, all methods for mode 3)
-        List<JavaSootMethod> entryPointMethods = new ArrayList<>();
-        int totalTargetMethods = 0;
-        
-        for (JavaSootClass clazz : view.getClasses().collect(Collectors.toList())) {
-            String className = clazz.getType().getFullyQualifiedName();
-            if (targetJarClasses.contains(className)) {
-                for (JavaSootMethod method : clazz.getMethods()) {
-                    totalTargetMethods++;
-                    
-                    if (allTargetMethods) {
-                        // Mode 3: Add ALL methods from target classes
-                        entryPointMethods.add(method);
-                    } else if (isMainMethod(method)) {
-                        // Mode 1: Only main methods
-                        entryPointMethods.add(method);
-                        System.out.println("Found main method: " + method.getSignature());
-                    }
-                }
-            }
-        }
-
-        if (allTargetMethods) {
-            System.out.println("Total target methods found: " + totalTargetMethods);
-            System.out.println("Using all " + entryPointMethods.size() + " target methods as entry points");
-        }
-
-        if ((onlyMainCalled || allTargetMethods) && entryPointMethods.isEmpty()) {
-            System.out.println("No entry point methods found in the target JARs.");
-            writeUniqueNativeMethodsToFile("unique_native_methods.txt", allUniqueNativeMethods);
-            writeMainCalledNativeMethods("native_methods_with_paths.txt", entryPointMethods, allTargetMethods);
-            writeDepsCalledByTarget("deps_called_by_target.txt", entryPointMethods, allTargetMethods);
-            return;
-        }
-
-        // 4) In --1 or --3 mode, DFS from each entry point to collect reachable natives
-        if (onlyMainCalled || allTargetMethods) {
-            int processedCount = 0;
-
-            // For Mode 3, share visited set across all entry points for performance
-            // For Mode 1, clear visited for each main method to get individual paths
-            if (onlyMainCalled) {
-                visited.clear();
-            }
-
-            for (JavaSootMethod entryPoint : entryPointMethods) {
-                if (onlyMainCalled) {
-                    visited.clear();
-                    nativePaths.clear();
-                    foundNative.clear();
-                }
-
-                List<MethodSignature> startPath = new ArrayList<>();
-                startPath.add(entryPoint.getSignature());
-                dfs(entryPoint.getSignature(), startPath);
-
-                allUniqueNativeMethods.addAll(foundNative);
-
-                processedCount++;
-                if (allTargetMethods && processedCount % 100 == 0) {
-                    System.out.println("  Processed " + processedCount + "/" + entryPointMethods.size() + " methods...");
-                }
-            }
-            
-            writeDepsCalledByTarget("deps_called_by_target.txt", entryPointMethods, allTargetMethods);
-        }
-
-        // 5) Write results based on mode
-        if (onlyMainCalled || allTargetMethods) {
-            writeMainCalledNativeMethods("native_methods_with_paths.txt", entryPointMethods, allTargetMethods);
-            writeUniqueNativeMethodsToFile("unique_native_methods.txt", allUniqueNativeMethods);
-        } else if (includeAllNative) {
-            System.out.println("\n=== Scanning All Classes for Native Methods ===");
-            scanAllNativeMethods();
-            System.out.println("Total native methods found in entire codebase: " + allUniqueNativeMethods.size());
-
-            scanTargetAndDependencyNatives();
-
-            Set<MethodSignature> reachableNatives = new HashSet<>();
-            List<JavaSootMethod> mainMethods = entryPointMethods.stream()
-                .filter(PrototypeFinal::isMainMethod)
-                .collect(Collectors.toList());
-                
-            if (!mainMethods.isEmpty()) {
-                for (JavaSootMethod main : mainMethods) {
-                    visited.clear();
-                    nativePaths.clear();
-                    foundNative.clear();
-
-                    List<MethodSignature> startPath = new ArrayList<>();
-                    startPath.add(main.getSignature());
-                    dfs(main.getSignature(), startPath);
-
-                    reachableNatives.addAll(foundNative);
-                }
-            } else {
-                System.out.println("[WARN] No main methods found; cannot determine JRE natives used.");
-            }
-
-            for (MethodSignature sig : reachableNatives) {
-                String className = sig.getDeclClassType().getFullyQualifiedName();
-                if (!targetJarClasses.contains(className) && !dependencyClasses.contains(className)) {
-                    jreUsedNativeMethods.add(sig);
-                }
-            }
-
-            writeAllTargetDepFlat("all_target_dep_natives.txt", allTargetDepNativeMethods);
-            writeJreUsedSignatures("jre_used_natives.txt", jreUsedNativeMethods);
-            writeAllTargetDepSignatures("all_target_dep_natives_signatures.txt", allTargetDepNativeMethods);
-            writeDepsCalledByTarget_AllTargets("deps_called_by_target.txt");
-            writeNativeMethodsByPackage("native_methods_by_package.txt", allUniqueNativeMethods);
-            writeCallGraph("callgraph.json");
-        }
     }
-    /**
-     * Ensures formatted_methods.txt exists so downstream tooling can read/write it safely.
-     */
-    private static void ensureFormattedMethodsFile() {
-        File formattedFile = new File(resolveFormattedMethodsPath());
-        if (formattedFile.exists()) {
-            return;
-        }
-        try {
-            File parent = formattedFile.getParentFile();
-            if (parent != null && !parent.exists()) {
-                parent.mkdirs();
-            }
-            if (formattedFile.createNewFile()) {
-                System.out.println("[INFO] Created formatted_methods.txt");
-            }
-        } catch (IOException e) {
-            System.err.println("[WARN] Could not create formatted_methods.txt: " + e.getMessage());
-        }
-    }
-
-    private static String resolveFormattedMethodsPath() {
-        String outputsDir = System.getenv("OUTPUTS_DIR");
-        if (outputsDir != null && !outputsDir.isBlank()) {
-            if (outputsDir.endsWith(File.separator)) {
-                return outputsDir + "formatted_methods.txt";
-            }
-            return outputsDir + File.separator + "formatted_methods.txt";
-        }
-        return FALLBACK_FORMATTED_METHODS_FILE;
-    }
-
-    private static String resolveNativeFilePath() {
-        String outputsDir = System.getenv("OUTPUTS_DIR");
-        if (outputsDir != null && !outputsDir.isBlank()) {
-            if (outputsDir.endsWith(File.separator)) {
-                return outputsDir + "native_methods.txt";
-            }
-            return outputsDir + File.separator + "native_methods.txt";
-        }
-        return FALLBACK_NATIVE_FILE;
-    }
-
     private static void writeStringToFile(String content, File file) throws IOException {
         File parent = file.getParentFile();
         if (parent != null && !parent.exists()) {
@@ -387,12 +158,12 @@ public class PrototypeFinal {
 
 
     /**
-     * Executes HybridByteCodeTracer analysis (Mode 4)
+     * Executes HybridByteCodeTracer analysis (Mode 1)
      *
      * FUNCTION NAME: runHybridByteCodeTracer
      *
      * USAGE:
-     *   Called internally when --4 mode is selected
+     *   Called internally when --1 mode is selected
      * 
      * INPUT REQUIRED:
      *   - targetDir: Directory containing target application JAR files
@@ -468,12 +239,12 @@ public class PrototypeFinal {
     }
 
     /**
-     * Executes SootUp Visitor Pattern analysis (Mode 5)
+     * Executes SootUp Visitor Pattern analysis (Mode 2)
      *
      * FUNCTION NAME: runSootUpVisitorPattern
      *
      * USAGE:
-     *   Called internally when --5 mode is selected
+     *   Called internally when --2 mode is selected
      *
      * INPUT REQUIRED:
      *   - targetDir: Directory containing target application JAR files
@@ -481,7 +252,7 @@ public class PrototypeFinal {
      *
      * WHAT IT'S USED FOR:
      *   - Performs SootUp-based Jimple analysis using visitor pattern
-     *   - Similar to Mode 4 but uses SootUp/Jimple instead of ASM/bytecode
+     *   - Similar to Mode 1 but uses SootUp/Jimple instead of ASM/bytecode
      *   - Worklist-based traversal without explicit DFS/BFS
      *   - Traces method calls through Jimple statements
      *   - Generates comprehensive native method usage report
@@ -496,43 +267,88 @@ public class PrototypeFinal {
      *   7. Display performance metrics
      */
     private static void runSootUpVisitorPattern(String targetDir, String depsDir) throws IOException {
-        System.out.println("Starting SootUp Visitor Pattern analysis (FIXED - Method-based worklist)...");
+        System.out.println("Starting SootUp Visitor Pattern analysis (Method-based worklist)...");
 
         long startTime = System.currentTimeMillis();
 
-        // Track visited methods and found natives
-        Set<String> visitedMethodsMode6 = new HashSet<>();
-        Set<String> nativeMethodsMode6 = new HashSet<>();
+        // ========== DATA STRUCTURES FOR ANALYSIS ==========
 
-        // BUILD CALL GRAPH! (caller -> list of callees)
-        Map<String, Set<String>> callGraphMode6 = new HashMap<>();
-        Map<String, Set<String>> nativeCallersMap = new HashMap<>(); // native -> callers
+        // Track visited methods to prevent duplicate analysis and infinite loops
+        // Contains method signatures in SootUp format: "<ClassName: ReturnType methodName(ParamTypes)>"
+        Set<String> visitedMethods = new HashSet<>();
 
-        // Load JARs
+        // Store all discovered native methods (final output)
+        // Simple format: "ClassName.methodName" (e.g., "java.lang.System.currentTimeMillis")
+        Set<String> nativeMethods = new HashSet<>();
+
+        // BUILD CALL GRAPH - Maps each method to the set of methods it calls
+        // Key: Method signature (caller) - the method doing the calling
+        // Value: Set of method signatures this method invokes (callees)
+        // Example: "<com.example.App: void main(String[])>" ->
+        //          {"<com.example.Utils: String helper()>", "<java.io.PrintStream: void println(String)>"}
+        // This creates a directed graph where edges represent "calls" relationships
+        Map<String, Set<String>> callGraph = new HashMap<>();
+
+        // Maps each native method to the set of methods that directly call it
+        // Key: Native method name (simple format: "ClassName.methodName")
+        // Value: Set of method signatures that invoke this native
+        // This helps us identify which application methods depend on which natives
+        // Example: "java.lang.System.currentTimeMillis" ->
+        //          {"<com.example.Timer: long getTime()>", "<com.example.Logger: void log()>"}
+        Map<String, Set<String>> nativeCallersMap = new HashMap<>();
+
+        // ========== LOAD JAR FILES ==========
+
+        // Recursively scan target and dependency directories for JAR files
+        // This also populates:
+        //   - targetJarClasses: Set of all class names found in target JARs
+        //   - dependencyClasses: Set of all class names found in dependency JARs
+        //   - classToJar: Map from class name to the JAR file containing it
         List<String> targetJars = loadJarsFromDirectory(targetDir, targetJarClasses, classToJar, "target");
         List<String> depJars = loadJarsFromDirectory(depsDir, dependencyClasses, classToJar, "dependency");
 
         System.out.println("Target JARs contain " + targetJarClasses.size() + " classes");
         System.out.println("Dependencies contain " + dependencyClasses.size() + " classes");
 
-        // Build SootUp view (needed for method resolution)
+        // ========== BUILD SOOTUP VIEW ==========
+
+        // SootUp's "view" is the core abstraction for analyzing Java code
+        // It provides:
+        //   1. Method resolution: Look up method signatures and get their implementations
+        //   2. Jimple access: Convert bytecode to Jimple intermediate representation
+        //   3. Class hierarchy: Understand inheritance and interface relationships
+        //
+        // We add three types of input locations:
+        //   1. Target JARs: The application we're analyzing
+        //   2. Dependency JARs: Libraries the application uses
+        //   3. JRE runtime: Standard Java libraries (java.lang.*, java.util.*, etc.)
         List<AnalysisInputLocation> inputs = new ArrayList<>();
         for (String jar : targetJars) inputs.add(new JavaClassPathAnalysisInputLocation(jar));
         for (String depJar : depJars) inputs.add(new JavaClassPathAnalysisInputLocation(depJar));
-        inputs.add(new DefaultRuntimeAnalysisInputLocation());
-        JavaView mode6View = new JavaView(inputs);
+        inputs.add(new DefaultRuntimeAnalysisInputLocation());  // Adds JRE classes
+        JavaView view = new JavaView(inputs);
 
         System.out.println("\nStarting method-based worklist analysis..");
 
+        // ========== INITIALIZE METHOD WORKLIST ==========
+
         // METHOD-BASED WORKLIST (not class-based!)
-        // This is the key fix: we follow method calls transitively, just like Mode 4
+        // This is the key approach: we follow method calls transitively, just like Mode 1
+        //
+        // The worklist algorithm:
+        //   1. Start with all methods from the target application
+        //   2. Process each method to find what it calls
+        //   3. Add called methods to the worklist
+        //   4. Repeat until worklist is empty (fixed-point)
+        //
+        // This creates a TRANSITIVE CLOSURE of all reachable methods from the application
         Queue<MethodSignature> methodWorklist = new LinkedList<>();
 
         // Initialize worklist with all methods from target classes
-        // (Similar to Mode 4 starting from classes in the target JARs)
+        // (Similar to Mode 1 starting from classes in the target JARs)
         for (String className : targetJarClasses) {
-            Optional<JavaSootClass> classOpt = mode6View.getClass(
-                mode6View.getIdentifierFactory().getClassType(className)
+            Optional<JavaSootClass> classOpt = view.getClass(
+                view.getIdentifierFactory().getClassType(className)
             );
             if (classOpt.isPresent()) {
                 for (JavaSootMethod method : classOpt.get().getMethods()) {
@@ -543,8 +359,8 @@ public class PrototypeFinal {
 
         // Also add dependency methods (if you want to be comprehensive)
         for (String className : dependencyClasses) {
-            Optional<JavaSootClass> classOpt = mode6View.getClass(
-                mode6View.getIdentifierFactory().getClassType(className)
+            Optional<JavaSootClass> classOpt = view.getClass(
+                view.getIdentifierFactory().getClassType(className)
             );
             if (classOpt.isPresent()) {
                 for (JavaSootMethod method : classOpt.get().getMethods()) {
@@ -558,25 +374,30 @@ public class PrototypeFinal {
         int processedMethods = 0;
         int progressInterval = 100;
 
+        // ========== MAIN WORKLIST PROCESSING LOOP ==========
         // Process methods one by one, following calls transitively
+        // This implements a worklist-based fixed-point algorithm
         while (!methodWorklist.isEmpty()) {
+            // STEP 1: Dequeue the next method from the worklist
             MethodSignature methodSig = methodWorklist.poll();
             String methodId = methodSig.toString();
 
-            // Skip if already visited
-            if (visitedMethodsMode6.contains(methodId)) {
+            // STEP 2: Skip if already visited (prevents infinite loops and duplicate work)
+            if (visitedMethods.contains(methodId)) {
                 continue;
             }
-            visitedMethodsMode6.add(methodId);
+            visitedMethods.add(methodId);
 
+            // STEP 3: Progress reporting (shows analysis is progressing)
             processedMethods++;
             if (processedMethods % progressInterval == 0) {
                 System.out.println("  Processed " + processedMethods + " methods, found " +
-                                 nativeMethodsMode6.size() + " natives...");
+                                 nativeMethods.size() + " natives...");
             }
 
-            // Try to get the method
-            Optional<JavaSootMethod> methodOpt = mode6View.getMethod(methodSig);
+            // STEP 4: Try to get the method implementation from SootUp view
+            // This may fail if the method is from a missing dependency
+            Optional<JavaSootMethod> methodOpt = view.getMethod(methodSig);
             if (!methodOpt.isPresent()) {
                 continue;
             }
@@ -584,85 +405,100 @@ public class PrototypeFinal {
             JavaSootMethod method = methodOpt.get();
             String className = methodSig.getDeclClassType().getFullyQualifiedName();
 
-            // Check if native (like Mode 4's ACC_NATIVE check)
+            // STEP 5: Check if this method is native
+            // This is equivalent to checking the ACC_NATIVE flag in bytecode (Mode 1)
+            // If native, record it in our results set
             if (method.getModifiers().contains(MethodModifier.NATIVE)) {
                 String nativeName = className + "." + method.getName();
-                nativeMethodsMode6.add(nativeName);
+                nativeMethods.add(nativeName);
                 System.out.println("[ * Found native method * ] " + nativeName);
             }
 
-            // If method has no body, we can't follow calls from it
+            // STEP 6: Skip methods without a body (abstract, native, interface methods)
+            // We can't analyze calls from these methods since there's no implementation
             if (!method.hasBody()) {
                 continue;
             }
 
-            // Follow method calls (THIS IS THE KEY FIX!)
+            // STEP 7: Analyze method body to find all method calls (KEY STEP!)
+            // This is where we build the call graph and find natives transitively
             try {
+                // Get the method's Jimple IR (intermediate representation)
+                // Jimple is a 3-address code format that's easier to analyze than bytecode
                 Body body = method.getBody();
 
-                // Process statements to find method calls
+                // Process all statements in the method to find method invocations
+                // Jimple statements include assignments, calls, conditionals, etc.
                 for (Object stmtObj : body.getStmts()) {
+                    // Check if this statement is a method invocation
+                    // InvokableStmt represents method calls (virtual, static, special, interface, dynamic)
                     if (stmtObj instanceof InvokableStmt) {
                         ((InvokableStmt) stmtObj).getInvokeExpr().ifPresent(invokeExpr -> {
+                            // Extract the signature of the method being called
                             MethodSignature callee = invokeExpr.getMethodSignature();
                             String calleeId = callee.toString();
                             String calleeClassName = callee.getDeclClassType().getFullyQualifiedName();
 
-                            // BUILD CALL GRAPH EDGE: methodId -> calleeId
-                            callGraphMode6.computeIfAbsent(methodId, k -> new HashSet<>()).add(calleeId);
+                            // BUILD CALL GRAPH EDGE: Add "methodId calls calleeId" relationship
+                            // This creates a directed edge in our call graph
+                            callGraph.computeIfAbsent(methodId, k -> new HashSet<>()).add(calleeId);
 
-                            // Check if callee is native and track caller
+                            // Check if the called method is native
+                            // If so, track that this method (methodId) calls a native
                             try {
-                                Optional<JavaSootMethod> calleeMethodOpt = mode6View.getMethod(callee);
+                                Optional<JavaSootMethod> calleeMethodOpt = view.getMethod(callee);
                                 if (calleeMethodOpt.isPresent() &&
                                     calleeMethodOpt.get().getModifiers().contains(MethodModifier.NATIVE)) {
                                     String nativeName = calleeClassName + "." + callee.getName();
+                                    // Record that methodId directly calls this native method
                                     nativeCallersMap.computeIfAbsent(nativeName, k -> new HashSet<>()).add(methodId);
                                 }
                             } catch (Exception ignored) {}
 
-                            // Add called method to worklist if not already visited
-                            // This will naturally follow calls into JRE, dependencies, etc.
-                            if (!visitedMethodsMode6.contains(calleeId)) {
+                            // Add the called method to the worklist if not already visited
+                            // This is the TRANSITIVE part - we follow calls into JRE, libraries, etc.
+                            // Eventually we'll reach all methods reachable from the application
+                            if (!visitedMethods.contains(calleeId)) {
                                 methodWorklist.add(callee);
                             }
                         });
                     }
                 }
             } catch (VerifyError | Exception e) {
-                // Skip methods that can't be analyzed
-                // (Same error handling as Mode 4)
+                // Skip methods that can't be analyzed due to verification errors
+                // This can happen with malformed bytecode or SootUp limitations
+                // Same defensive error handling approach as Mode 1
             }
         }
 
         // Write results
         String outputFile = "sootup_visitor_natives.txt";
-        writeMode5Results(outputFile, nativeMethodsMode6, visitedMethodsMode6.size());
+        writeMode2Results(outputFile, nativeMethods, visitedMethods.size());
 
         // Write call graph
-        String callGraphFile = "mode5_callgraph.txt";
-        writeMode5CallGraph(callGraphFile, callGraphMode6, nativeCallersMap, nativeMethodsMode6);
+        String callGraphFile = "mode2_callgraph.txt";
+        writeMode2CallGraph(callGraphFile, callGraph, nativeCallersMap, nativeMethods);
 
         // Write call chains (full paths from entry points to natives)
         System.out.println("\nBuilding call chains to native methods...");
-        String callChainsFile = "mode5_callchains.txt";
-        Set<String> allEntryPoints = new HashSet<>(visitedMethodsMode6);
-        writeMode5CallChains(callChainsFile, callGraphMode6, nativeMethodsMode6, nativeCallersMap, allEntryPoints, targetJarClasses);
+        String callChainsFile = "mode2_callchains.txt";
+        Set<String> allEntryPoints = new HashSet<>(visitedMethods);
+        writeMode2CallChains(callChainsFile, callGraph, nativeMethods, nativeCallersMap, allEntryPoints, targetJarClasses);
 
         long endTime = System.currentTimeMillis();
         long totalTime = endTime - startTime;
         double totalTimeInSeconds = (double) totalTime / 1000;
         System.out.println("\nAnalysis complete!");
         System.out.println("Time taken: " + totalTimeInSeconds + " seconds");
-        System.out.println("Total methods visited: " + visitedMethodsMode6.size());
-        System.out.println("Native methods found: " + nativeMethodsMode6.size());
-        System.out.println("Call graph edges: " + callGraphMode6.size());
+        System.out.println("Total methods visited: " + visitedMethods.size());
+        System.out.println("Native methods found: " + nativeMethods.size());
+        System.out.println("Call graph edges: " + callGraph.size());
     }
 
     /**
-     * Writes Mode 5 results to file
+     * Writes Mode 2 results to file
      */
-    private static void writeMode5Results(String filename, Set<String> nativeMethods, int totalVisited) {
+    private static void writeMode2Results(String filename, Set<String> nativeMethods, int totalVisited) {
         try {
             StringBuilder content = new StringBuilder();
             content.append("=== SootUp Visitor Pattern Analysis Results ===\n\n");
@@ -691,14 +527,14 @@ public class PrototypeFinal {
     }
 
     /**
-     * Writes Mode 5 call graph to file
+     * Writes Mode 2 call graph to file
      */
-    private static void writeMode5CallGraph(String filename, Map<String, Set<String>> callGraph,
+    private static void writeMode2CallGraph(String filename, Map<String, Set<String>> callGraph,
                                            Map<String, Set<String>> nativeCallersMap,
                                            Set<String> nativeMethods) {
         try {
             StringBuilder content = new StringBuilder();
-            content.append("=== SootUp Mode 5 Call Graph Analysis ===\n\n");
+            content.append("=== SootUp Mode 2 Call Graph Analysis ===\n\n");
 
             // Section 1: Summary statistics
             content.append("SUMMARY:\n");
@@ -775,7 +611,7 @@ public class PrototypeFinal {
     /**
      * Writes call chains showing complete paths from entry points to native methods
      */
-    private static void writeMode5CallChains(String filename,
+    private static void writeMode2CallChains(String filename,
                                             Map<String, Set<String>> callGraph,
                                             Set<String> nativeMethods,
                                             Map<String, Set<String>> nativeCallersMap,
@@ -783,7 +619,7 @@ public class PrototypeFinal {
                                             Set<String> targetClasses) {
         try {
             StringBuilder content = new StringBuilder();
-            content.append("=== SootUp Mode 5 Call Chains Analysis ===\n\n");
+            content.append("=== SootUp Mode 2 Call Chains Analysis ===\n\n");
             content.append("This shows example execution paths from entry points to native methods\n\n");
 
             // Build reverse call graph (callee -> callers)
@@ -959,11 +795,41 @@ public class PrototypeFinal {
 
     /**
      * Checks if a native method is likely called via reflection or is part of reflection API
+     *
+     * FUNCTION NAME: isLikelyReflectionCall
+     *
+     * PURPOSE:
+     *   Heuristically determines if a native method is invoked through Java reflection
+     *   or is itself part of the reflection API implementation.
+     *
+     * WHY THIS IS NEEDED:
+     *   Static analysis cannot see through reflection - when code uses Method.invoke() or
+     *   Class.forName(), the actual methods called are determined at runtime, not statically.
+     *   This means some natives won't have visible call chains in our call graph.
+     *   This function helps categorize those "unreachable" natives as likely reflection-based.
+     *
+     * DETECTION STRATEGY:
+     *   Two-part heuristic:
+     *   1. DIRECT: Is the native itself part of the reflection API?
+     *   2. INDIRECT: Do any callers (up to 5 levels) use reflection methods?
+     *
+     * PARAMETERS:
+     *   - nativeMethod: Simple name of native method (e.g., "java.lang.Class.forName0")
+     *   - nativeCallersMap: Map of native -> direct callers
+     *   - callGraph: Map of caller -> callees (for traversing up the call chain)
+     *
+     * RETURNS:
+     *   true if likely called via reflection, false otherwise
      */
     private static boolean isLikelyReflectionCall(String nativeMethod,
                                                   Map<String, Set<String>> nativeCallersMap,
                                                   Map<String, Set<String>> callGraph) {
-        // Check if the native itself is part of the reflection API
+        // ========== DIRECT CHECK: IS THE NATIVE ITSELF REFLECTION API? ==========
+        // Many natives in the reflection API are themselves invoked reflectively
+        // Examples:
+        //   - java.lang.reflect.Method.invoke0 (the actual native behind Method.invoke)
+        //   - java.lang.Class.forName0 (the native behind Class.forName)
+        //   - java.lang.Class.getDeclaredMethods0
         if (nativeMethod.contains("java.lang.reflect.") ||
             nativeMethod.contains("java.lang.Class.forName") ||
             nativeMethod.contains("java.lang.Class.getDeclared") ||
@@ -976,13 +842,16 @@ public class PrototypeFinal {
             return true;
         }
 
-        // Get direct callers of this native
+        // ========== INDIRECT CHECK: DO CALLERS USE REFLECTION? ==========
+
+        // Get the methods that directly call this native
         Set<String> directCallers = nativeCallersMap.get(nativeMethod);
         if (directCallers == null || directCallers.isEmpty()) {
-            return false;
+            return false;  // No callers means we can't determine reflection usage
         }
 
-        // Reflection API methods that indicate reflection usage
+        // Define reflection API methods that indicate reflection is being used
+        // If any caller invokes these, the native is likely reached through reflection
         Set<String> reflectionMethods = new HashSet<>();
         reflectionMethods.add("java.lang.reflect.Method.invoke");
         reflectionMethods.add("java.lang.reflect.Constructor.newInstance");
@@ -992,56 +861,92 @@ public class PrototypeFinal {
         reflectionMethods.add("java.lang.reflect.Field.set");
         reflectionMethods.add("java.lang.invoke.MethodHandle.invoke");
 
-        // Check if any caller or their callers use reflection
+        // BFS up to 5 levels of callers to check for reflection usage
+        // We traverse UP the call chain (from callee to caller)
         Queue<String> toCheck = new LinkedList<>(directCallers);
         Set<String> visited = new HashSet<>();
         int depth = 0;
-        int maxDepth = 5; // Check up to 5 levels of callers
+        int maxDepth = 5;  // Don't go too far - trades recall for precision
 
+        // Level-by-level BFS (guarantees we check closer callers first)
         while (!toCheck.isEmpty() && depth < maxDepth) {
-            int levelSize = toCheck.size();
+            int levelSize = toCheck.size();  // Process one level at a time
+
             for (int i = 0; i < levelSize; i++) {
                 String method = toCheck.poll();
 
+                // Skip if already visited (avoid redundant checks)
                 if (visited.contains(method)) {
                     continue;
                 }
                 visited.add(method);
 
-                // Check if this method is a reflection method
+                // CHECK 1: Is this caller itself a reflection method?
                 for (String reflectionMethod : reflectionMethods) {
                     if (method.contains(reflectionMethod)) {
-                        return true;
+                        return true;  // Found reflection usage!
                     }
                 }
 
-                // Check if this method's callees include reflection methods
+                // CHECK 2: Does this caller invoke any reflection methods?
                 Set<String> callees = callGraph.get(method);
                 if (callees != null) {
                     for (String callee : callees) {
                         for (String reflectionMethod : reflectionMethods) {
                             if (callee.contains(reflectionMethod)) {
-                                return true;
+                                return true;  // Found reflection usage!
                             }
                         }
                     }
                 }
 
-                // Add callers to check next level (reverse lookup)
+                // Add this method's callers to the next level of BFS
+                // This is a reverse lookup: who calls this method?
                 for (Map.Entry<String, Set<String>> entry : callGraph.entrySet()) {
                     if (entry.getValue().contains(method)) {
                         toCheck.add(entry.getKey());
                     }
                 }
             }
-            depth++;
+            depth++;  // Move to next level
         }
 
-        return false;
+        return false;  // No reflection detected within search depth
     }
 
     /**
      * Find call chains backward from a native method to methods in target classes using BFS
+     *
+     * FUNCTION NAME: findCallChainsBackward
+     *
+     * PURPOSE:
+     *   Searches BACKWARD through the call graph from a native method to find execution
+     *   paths that start in the target application code.
+     *
+     * ALGORITHM:
+     *   Uses Breadth-First Search (BFS) on the reverse call graph
+     *   - Start from the native method
+     *   - Follow callers (who calls this method?)
+     *   - Continue until we reach a method in the target application
+     *   - Each path represents a possible execution flow from app to native
+     *
+     * PARAMETERS:
+     *   - targetMethod: The native method to search from (full signature)
+     *   - reverseCallGraph: Map of callee -> callers (backward edges)
+     *   - targetClasses: Set of application class names (entry points)
+     *   - maxDepth: Maximum chain length (prevents infinite search)
+     *   - maxChains: Maximum number of chains to find (stops early)
+     *
+     * RETURNS:
+     *   List of call chains, where each chain is a list of method signatures
+     *   from native (index 0) to entry point (last index)
+     *
+     * EXAMPLE OUTPUT:
+     *   Chain: [
+     *     "<java.lang.System: long currentTimeMillis()>",      // native
+     *     "<com.example.Timer: long getTime()>",              // calls native
+     *     "<com.example.App: void main(String[])>"            // entry point
+     *   ]
      */
     private static List<List<String>> findCallChainsBackward(
             String targetMethod,
@@ -1050,26 +955,45 @@ public class PrototypeFinal {
             int maxDepth,
             int maxChains) {
 
+        // Store all found call chains (result)
         List<List<String>> foundChains = new ArrayList<>();
+
+        // BFS queue: each element is a partial path from native to current method
         Queue<List<String>> queue = new LinkedList<>();
 
-        // Start from the target (native) method
+        // Initialize BFS: start from the target (native) method
         List<String> initialPath = new ArrayList<>();
         initialPath.add(targetMethod);
         queue.add(initialPath);
 
+        // Track visited edges to avoid redundant exploration
+        // We use "method1->method2" keys to remember which transitions we've tried
         Set<String> visitedInSearch = new HashSet<>();
-        int iterations = 0;
-        int maxIterations = 100000; // Safety limit
 
+        // Safety counter to prevent infinite loops
+        int iterations = 0;
+        int maxIterations = 100000;
+
+        // ========== BFS MAIN LOOP ==========
+        // Continue until:
+        //   1. Queue is empty (explored all paths)
+        //   2. Found enough chains (maxChains)
+        //   3. Safety limit reached
         while (!queue.isEmpty() && foundChains.size() < maxChains && iterations < maxIterations) {
             iterations++;
+
+            // Dequeue the next path to explore
             List<String> currentPath = queue.poll();
+
+            // Get the method at the end of this path (most recent caller)
             String currentMethod = currentPath.get(currentPath.size() - 1);
 
-            // Check if we've reached a method in target classes (entry point)
+            // CHECK IF REACHED ENTRY POINT: Is this method in the target application?
+            // If yes, we've found a complete chain from app to native
             boolean isInTargetClass = false;
             for (String targetClass : targetClasses) {
+                // Check if method signature contains the target class name
+                // Format: "<com.example.App: void main(...)>"
                 if (currentMethod.contains("<" + targetClass + ":")) {
                     isInTargetClass = true;
                     break;
@@ -1077,28 +1001,35 @@ public class PrototypeFinal {
             }
 
             if (isInTargetClass) {
+                // Found a complete chain! Save it and continue searching for more
                 foundChains.add(new ArrayList<>(currentPath));
-                continue; // Found a chain, keep looking for more
+                continue;
             }
 
-            // Don't go too deep
+            // DEPTH LIMIT: Don't explore paths that are too long
+            // This prevents exponential explosion in large call graphs
             if (currentPath.size() >= maxDepth) {
                 continue;
             }
 
-            // Get callers of current method
+            // EXPAND PATH: Get all methods that call the current method
             Set<String> callers = reverseCallGraph.get(currentMethod);
             if (callers != null) {
                 for (String caller : callers) {
-                    // Avoid cycles
+                    // CYCLE DETECTION: Don't revisit methods already in this path
+                    // Prevents: A -> B -> A -> B -> ...
                     if (!currentPath.contains(caller)) {
-                        // Avoid revisiting same method from different paths (optimization)
+                        // REDUNDANCY ELIMINATION: Don't explore the same edge twice
+                        // This is an optimization - different paths might converge
                         String pathKey = currentMethod + "->" + caller;
                         if (!visitedInSearch.contains(pathKey)) {
                             visitedInSearch.add(pathKey);
 
+                            // Create new path by appending this caller
                             List<String> newPath = new ArrayList<>(currentPath);
                             newPath.add(caller);
+
+                            // Add to queue for BFS exploration
                             queue.add(newPath);
                         }
                     }
@@ -1194,27 +1125,14 @@ public class PrototypeFinal {
             }
             String nativeContent = nativeContentBuilder.toString();
 
-            // Build formatted methods content (non-native methods only)
-            StringBuilder formattedContentBuilder = new StringBuilder();
-            for (String m : Util.visitedMethod) {
-                // Only add methods that are NOT in the native set
-                if (!Util.visitedNative.contains(m)) {
-                    formattedContentBuilder.append(m).append("\n");
-                }
-            }
-            String formattedContent = formattedContentBuilder.toString();
-
             // Write to files
-            File nativeOutput = new File(resolveNativeFilePath());
-            File formattedOutput = new File(resolveFormattedMethodsPath());
+            File nativeOutput = new File(NATIVE_METHODS_FILE);
 
             writeStringToFile(nativeContent, nativeOutput);
-            writeStringToFile(formattedContent, formattedOutput);
 
             // Print single consolidated output message
             System.out.println("Analysis results written to:");
             System.out.println("  - Native methods (" + Util.visitedNative.size() + "): " + nativeOutput.getAbsolutePath());
-            System.out.println("  - Formatted methods (" + (Util.visitedMethod.size() - Util.visitedNative.size()) + "): " + formattedOutput.getAbsolutePath());
         } catch(IOException e) {
             e.printStackTrace();
         }
@@ -1250,316 +1168,6 @@ public class PrototypeFinal {
         Util.println();
     }
 
-    // PrintpathDFS methods
-    private static void writeJreUsedSignatures(String filename, Set<MethodSignature> methods) {
-        try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
-            List<String> lines = methods.stream()
-                    .sorted(Comparator.comparing(MethodSignature::toString))
-                    .map(MethodSignature::toString)
-                    .collect(Collectors.toList());
-
-            writer.println("JRE native methods actually used by the application:");
-            for (int i = 0; i < lines.size(); i++) {
-                writer.println((i + 1) + ". " + lines.get(i));
-            }
-
-            System.out.println("\nJRE-used native methods written to: " + filename);
-            System.out.println("Total: " + lines.size());
-        } catch (IOException e) {
-            System.err.println("Error writing " + filename + ": " + e.getMessage());
-        }
-    }
-
-    private static void writeDepsCalledByTarget_AllTargets(String filename) {
-        Set<String> depClassesUsedByTarget = new HashSet<>();
-
-        System.out.println("[DEBUG] Call graph size: " + callGraph.size() + " entries");
-        System.out.println("[DEBUG] usedDepClasses size: " + usedDepClasses.size());
-        System.out.println("[DEBUG] targetJarClasses count: " + targetJarClasses.size());
-        System.out.println("[DEBUG] dependencyClasses count: " + dependencyClasses.size());
-
-        // Option 1: Use call graph edges (most accurate after DFS)
-        int targetCallsFound = 0;
-        int depCallsFound = 0;
-        for (Map.Entry<String, Set<String>> entry : callGraph.entrySet()) {
-            String caller = entry.getKey();
-            // Extract class name from method signature
-            // Format: <com.test.target.MainApp: void main(java.lang.String[])>
-            int colonIdx = caller.indexOf(':');
-            if (colonIdx > 0) {
-                String callerClass = caller.substring(1, colonIdx).trim();
-
-                if (targetJarClasses.contains(callerClass)) {
-                    targetCallsFound++;
-                    // This is a target class, check what it calls
-                    for (String callee : entry.getValue()) {
-                        int calleeColonIdx = callee.indexOf(':');
-                        if (calleeColonIdx > 0) {
-                            String calleeClass = callee.substring(1, calleeColonIdx).trim();
-                            if (dependencyClasses.contains(calleeClass)) {
-                                depClassesUsedByTarget.add(calleeClass);
-                                depCallsFound++;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        System.out.println("[DEBUG] Target methods in call graph: " + targetCallsFound);
-        System.out.println("[DEBUG] Dep calls from target: " + depCallsFound);
-
-        // Option 2: Also check usedDepClasses from DFS
-        depClassesUsedByTarget.addAll(usedDepClasses);
-        System.out.println("[DEBUG] Final depClassesUsedByTarget size: " + depClassesUsedByTarget.size());
-
-        try (PrintWriter out = new PrintWriter(new FileWriter(filename))) {
-            if (depClassesUsedByTarget.isEmpty()) {
-                out.println("No dependency calls detected anywhere in target classes.");
-                System.out.println("Deps-called-by-target (ALL) written to: " + new File(filename).getAbsolutePath());
-                return;
-            }
-
-            Set<String> depJars = depClassesUsedByTarget.stream()
-                    .map(cls -> classToJar.getOrDefault(cls, "(unknown-jar)"))
-                    .filter(p -> !"(unknown-jar)".equals(p))
-                    .collect(Collectors.toCollection(TreeSet::new));
-
-            out.println("Dependency JARs referenced by TARGET code (across all classes/methods):");
-            int i = 1;
-            for (String jar : depJars) out.println("  " + (i++) + ". " + jar);
-
-            out.println();
-            out.println("Dependency classes hit by TARGET code (" + depClassesUsedByTarget.size() + "):");
-            depClassesUsedByTarget.stream().sorted().forEach(c -> out.println("  - " + c));
-
-            System.out.println("Deps-called-by-target (ALL) written to: " + new File(filename).getAbsolutePath());
-        } catch (IOException e) {
-            System.err.println("Error writing " + filename + ": " + e.getMessage());
-        }
-    }
-
-    /**
-     * Scans all classes in the codebase to find native methods (Mode 2)
-     * 
-     * FUNCTION NAME: scanAllNativeMethods
-     * 
-     * USAGE:
-     *   Called internally when --2 mode is selected for comprehensive scanning
-     * 
-     * INPUT REQUIRED:
-     *   - None (uses global view and class sets)
-     * 
-     * WHAT IT'S USED FOR:
-     *   - Performs comprehensive scan of all classes in target, dependencies, and JRE
-     *   - Identifies and categorizes native methods by source (target/deps/JRE)
-     *   - Provides detailed statistics about native method distribution
-     *   - Detects specific important native methods (Tomcat, JNI, Unsafe, etc.)
-     *   - Updates global allUniqueNativeMethods set
-     * 
-     * PROCESS:
-     *   1. Iterate through all classes in the Soot view
-     *   2. Categorize classes as target, dependency, or JRE
-     *   3. Scan each class for native methods
-     *   4. Count and categorize native methods by source
-     *   5. Display detailed statistics and important findings
-     *   6. Update global native method collections
-     */
-    private static void scanAllNativeMethods() {
-        int targetClassCount = 0;
-        int dependencyClassCount = 0;
-        int jreClassCount = 0;
-        int targetNativeMethodCount = 0;
-        int dependencyNativeMethodCount = 0;
-        int jreNativeMethodCount = 0;
-
-        for (JavaSootClass clazz : view.getClasses().collect(Collectors.toList())) {
-            String className = clazz.getType().getFullyQualifiedName();
-
-            if (targetJarClasses.contains(className)) {
-                targetClassCount++;
-                for (JavaSootMethod method : clazz.getMethods()) {
-                    if (method.getModifiers().contains(MethodModifier.NATIVE)) {
-                        allUniqueNativeMethods.add(method.getSignature());
-                        targetNativeMethodCount++;
-                        System.out.println("Found TARGET native method: " + method.getSignature());
-                    }
-                }
-            } else if (dependencyClasses.contains(className)) {
-                dependencyClassCount++;
-                for (JavaSootMethod method : clazz.getMethods()) {
-                    if (method.getModifiers().contains(MethodModifier.NATIVE)) {
-                        allUniqueNativeMethods.add(method.getSignature());
-                        dependencyNativeMethodCount++;
-                        if (className.contains("tomcat") || className.contains("jni")) {
-                            System.out.println("Found Tomcat/JNI native method: " + method.getSignature());
-                        }
-                    }
-                }
-            } else {
-                jreClassCount++;
-                for (JavaSootMethod method : clazz.getMethods()) {
-                    if (method.getModifiers().contains(MethodModifier.NATIVE)) {
-                        allUniqueNativeMethods.add(method.getSignature());
-                        jreNativeMethodCount++;
-                        if (className.startsWith("sun.misc.Unsafe") || 
-                            className.startsWith("java.lang.Thread") ||
-                            className.startsWith("java.lang.Class") ||
-                            className.startsWith("java.util.zip.ZipFile") ||
-                            className.startsWith("java.lang.ClassLoader")) {
-                            System.out.println("Found JRE native method: " + method.getSignature());
-                        }
-                    }
-                }
-            }
-        }
-
-        System.out.println("Scanned " + (targetClassCount + dependencyClassCount + jreClassCount) + " total classes:");
-        System.out.println("  - Target classes: " + targetClassCount);
-        System.out.println("  - Dependency classes: " + dependencyClassCount);
-        System.out.println("  - JRE classes: " + jreClassCount);
-        System.out.println("Found " + allUniqueNativeMethods.size() + " total native methods:");
-        System.out.println("  - Target JARs: " + targetNativeMethodCount);
-        System.out.println("  - Dependencies: " + dependencyNativeMethodCount);
-        System.out.println("  - JRE: " + jreNativeMethodCount);
-        
-        System.out.println("\nDEBUG: Tomcat class breakdown:");
-        long tomcatInTarget = targetJarClasses.stream().filter(cls -> cls.contains("org.apache.tomcat")).count();
-        long tomcatInDeps = dependencyClasses.stream().filter(cls -> cls.contains("org.apache.tomcat")).count();
-        System.out.println("  - Tomcat classes in target: " + tomcatInTarget);
-        System.out.println("  - Tomcat classes in deps: " + tomcatInDeps);
-    }
-
-    private static void scanTargetAndDependencyNatives() {
-        for (JavaSootClass clazz : view.getClasses().collect(Collectors.toList())) {
-            String className = clazz.getType().getFullyQualifiedName();
-            if (targetJarClasses.contains(className) || dependencyClasses.contains(className)) {
-                for (JavaSootMethod m : clazz.getMethods()) {
-                    if (m.getModifiers().contains(MethodModifier.NATIVE)) {
-                        allTargetDepNativeMethods.add(m.getSignature());
-                    }
-                }
-            }
-        }
-    }
-
-    private static void writeAllTargetDepSignatures(String filename, Set<MethodSignature> methods) {
-        try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
-            List<MethodSignature> sorted = methods.stream()
-                    .sorted(Comparator.comparing(MethodSignature::toString))
-                    .collect(Collectors.toList());
-
-            writer.println("All native methods (target + dependencies) — full signatures:");
-            for (int i = 0; i < sorted.size(); i++) {
-                writer.println((i + 1) + ". " + sorted.get(i));
-            }
-
-            System.out.println("\nTarget+Deps native **signatures** written to: " + filename);
-            System.out.println("Total signatures (no overload collapse): " + sorted.size());
-        } catch (IOException e) {
-            System.err.println("Error writing " + filename + ": " + e.getMessage());
-        }
-    }
-
-    private static void writeDepsCalledByTarget(String filename, List<JavaSootMethod> entryMethods, boolean allTargetMode) {
-        try (PrintWriter out = new PrintWriter(new FileWriter(filename))) {
-            if (entryMethods.isEmpty()) {
-                out.println("(No entry point methods found in target JARs.)");
-                System.out.println("\nDeps-called-by-target written to: " + filename);
-                return;
-            }
-
-            if (allTargetMode) {
-                Set<String> allUsedDepClasses = new HashSet<>();
-                
-                for (JavaSootMethod method : entryMethods) {
-                    visited.clear();
-                    nativePaths.clear();
-                    foundNative.clear();
-                    usedDepClasses.clear();
-
-                    List<MethodSignature> startPath = new ArrayList<>();
-                    startPath.add(method.getSignature());
-                    dfs(method.getSignature(), startPath);
-                    
-                    allUsedDepClasses.addAll(usedDepClasses);
-                }
-
-                Set<String> usedDepJars = allUsedDepClasses.stream()
-                    .map(cls -> classToJar.getOrDefault(cls, "(unknown-jar)"))
-                    .filter(p -> !"(unknown-jar)".equals(p))
-                    .collect(Collectors.toCollection(TreeSet::new));
-
-                out.println("=== All Target Methods (Mode 3) ===");
-                out.println("Total entry points analyzed: " + entryMethods.size());
-                if (usedDepJars.isEmpty()) {
-                    out.println("No dependency calls detected (only target/JRE classes reached).");
-                } else {
-                    out.println("Dependency JARs actually called from target:");
-                    int idx = 1;
-                    for (String jar : usedDepJars) {
-                        out.println("  " + (idx++) + ". " + jar);
-                    }
-                    out.println("\nTotal unique dependency classes used: " + allUsedDepClasses.size());
-                }
-            } else {
-                for (int i = 0; i < entryMethods.size(); i++) {
-                    JavaSootMethod main = entryMethods.get(i);
-
-                    visited.clear();
-                    nativePaths.clear();
-                    foundNative.clear();
-                    usedDepClasses.clear();
-
-                    List<MethodSignature> startPath = new ArrayList<>();
-                    startPath.add(main.getSignature());
-                    dfs(main.getSignature(), startPath);
-
-                    Set<String> usedDepJars = usedDepClasses.stream()
-                        .map(cls -> classToJar.getOrDefault(cls, "(unknown-jar)"))
-                        .filter(p -> !"(unknown-jar)".equals(p))
-                        .collect(Collectors.toCollection(TreeSet::new));
-
-                    out.println("=== Main Method " + (i + 1) + ": " + main.getSignature() + " ===");
-                    if (usedDepJars.isEmpty()) {
-                        out.println("No dependency calls detected (only target/JRE classes reached).");
-                    } else {
-                        out.println("Dependency JARs actually called from target:");
-                        int idx = 1;
-                        for (String jar : usedDepJars) {
-                            out.println("  " + (idx++) + ". " + jar);
-                        }
-                    }
-                    out.println();
-                }
-            }
-            System.out.println("\nDeps-called-by-target written to: " + filename);
-        } catch (IOException e) {
-            System.err.println("Error writing " + filename + ": " + e.getMessage());
-        }
-    }
-
-    private static void writeAllTargetDepFlat(String filename, Set<MethodSignature> methods) {
-        try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
-            Map<String, Long> byName = methods.stream()
-                .collect(Collectors.groupingBy(
-                    sig -> sig.getDeclClassType().getFullyQualifiedName() + "." + sig.getName(),
-                    Collectors.counting()
-                ));
-
-            List<String> lines = byName.entrySet().stream()
-                .map(e -> e.getKey() + (e.getValue() > 1 ? "  (+" + (e.getValue()-1) + " overloads)" : ""))
-                .sorted()
-                .collect(Collectors.toList());
-
-            for (String line : lines) writer.println(line);
-
-            System.out.println("\nTarget+Deps native methods (flat) written to: " + filename);
-            System.out.println("Unique names (overloads collapsed): " + lines.size());
-        } catch (IOException e) {
-            System.err.println("Error writing " + filename + ": " + e.getMessage());
-        }
-    }
 
     /**
      * Loads JAR files from a directory and indexes their class contents
@@ -1637,429 +1245,6 @@ public class PrototypeFinal {
         return jarList;
     }
 
-    /**
-     * Determines if a method is a valid main method entry point
-     * 
-     * FUNCTION NAME: isMainMethod
-     * 
-     * USAGE:
-     *   Called internally to identify main methods for analysis entry points
-     * 
-     * INPUT REQUIRED:
-     *   - m: JavaSootMethod to check
-     * 
-     * WHAT IT'S USED FOR:
-     *   - Validates if a method matches Java main method signature
-     *   - Ensures proper entry point selection for analysis
-     *   - Filters methods to only include valid main methods
-     *   - Supports standard Java application entry point detection
-     * 
-     * VALIDATION CRITERIA:
-     *   - Method name must be "main"
-     *   - Must be public and static
-     *   - Must have exactly one parameter of type String[]
-     *   - Must return void
-     */
-    private static boolean isMainMethod(JavaSootMethod m) {
-        return m.getName().equals("main")
-                && m.getModifiers().contains(MethodModifier.PUBLIC)
-                && m.getModifiers().contains(MethodModifier.STATIC)
-                && m.getParameterTypes().size() == 1
-                && m.getParameterTypes().get(0).toString().equals("java.lang.String[]")
-                && m.getReturnType().toString().equals("void");
-    }
-
-    /**
-     * Performs depth-first search to trace method calls and find native methods
-     * 
-     * FUNCTION NAME: dfs
-     * 
-     * USAGE:
-     *   Called recursively to trace method call chains from entry points
-     * 
-     * INPUT REQUIRED:
-     *   - sig: MethodSignature to analyze
-     *   - currentPath: List representing current call path from entry point
-     * 
-     * WHAT IT'S USED FOR:
-     *   - Traces method call chains using depth-first search algorithm
-     *   - Identifies native methods reachable from entry points
-     *   - Builds call paths showing how native methods are reached
-     *   - Tracks dependency class usage
-     *   - Handles method resolution including inheritance
-     *   - Prevents infinite recursion with visited set
-     * 
-     * PROCESS:
-     *   1. Check if method already visited (prevent cycles)
-     *   2. Mark method as visited
-     *   3. Track dependency class usage
-     *   4. Resolve method (including inherited methods)
-     *   5. Check if method is native (terminal condition)
-     *   6. If not native, analyze method body for calls
-     *   7. Recursively call dfs for each method call found
-     */
-    private static void dfs(MethodSignature sig, List<MethodSignature> currentPath) {
-        if (visited.contains(sig)) return;
-        visited.add(sig);
-
-        String decl = sig.getDeclClassType().getFullyQualifiedName();
-
-        // OPTIMIZATION: Package filtering for JRE classes
-        // Only record JRE natives, don't explore their implementations
-        if (decl.startsWith("java.") || decl.startsWith("javax.") ||
-            decl.startsWith("jdk.") || decl.startsWith("sun.") ||
-            decl.startsWith("com.sun.")) {
-
-            // Check if it's a native method
-            Optional<JavaSootMethod> jreOpt = view.getMethod(sig);
-            if (jreOpt.isPresent() && jreOpt.get().getModifiers().contains(MethodModifier.NATIVE)) {
-                foundNative.add(sig);
-                nativePaths.add(new ArrayList<>(currentPath));
-                System.out.println("  [NATIVE] Found: " + sig);
-            }
-            return; // Don't explore JRE method bodies (huge speedup)
-        }
-
-        if (dependencyClasses.contains(decl)) {
-            usedDepClasses.add(decl);
-        }
-
-        // System.out.println("  [DEBUG] Analyzing: " + sig);
-
-        Optional<JavaSootMethod> opt = view.getMethod(sig);
-
-        if (!opt.isPresent()) {
-            opt = findInheritedMethod(sig);
-        }
-
-        if (!opt.isPresent()) {
-            // System.out.println("  [WARN] Method not found: " + sig);
-            return;
-        }
-
-        JavaSootMethod m = opt.get();
-
-        if (m.getModifiers().contains(MethodModifier.NATIVE)) {
-            foundNative.add(sig);
-            nativePaths.add(new ArrayList<>(currentPath));
-            System.out.println("  [NATIVE] Found: " + sig);
-            // System.out.println("  [NATIVE] Path: " + buildPathString(currentPath));
-            return;
-        }
-
-        try {
-            if (!m.hasBody()) {
-                // System.out.println("  [DEBUG] No body: " + sig);
-                return;
-            }
-
-            Body body = m.getBody();
-            if (body == null) {
-                // System.out.println("  [DEBUG] Body is null: " + sig);
-                return;
-            }
-
-            for (Object stmtObj : body.getStmts()) {
-                if (stmtObj instanceof InvokableStmt) {
-                    ((InvokableStmt) stmtObj).getInvokeExpr().ifPresent(invokeExpr -> {
-                        MethodSignature callee = invokeExpr.getMethodSignature();
-                        // System.out.println("  [DEBUG] Found call: " + callee);
-
-                        // Record call graph edge: sig -> callee
-                        String caller = sig.toString();
-                        String calleeStr = callee.toString();
-                        callGraph.computeIfAbsent(caller, k -> new HashSet<>()).add(calleeStr);
-
-                        List<MethodSignature> newPath = new ArrayList<>(currentPath);
-                        newPath.add(callee);
-                        dfs(callee, newPath);
-                    });
-                }
-            }
-        } catch (Throwable t) {
-            System.err.println("  [WARN] Could not analyze " + sig + ": " + t.getMessage());
-        }
-    }
-
-    /**
-     * Finds inherited methods when direct method resolution fails
-     * 
-     * FUNCTION NAME: findInheritedMethod
-     * 
-     * USAGE:
-     *   Called internally when direct method lookup fails in dfs
-     * 
-     * INPUT REQUIRED:
-     *   - sig: MethodSignature to search for
-     * 
-     * WHAT IT'S USED FOR:
-     *   - Handles method resolution across inheritance hierarchies
-     *   - Searches for methods in superclasses when not found in declared class
-     *   - Supports polymorphic method calls and inheritance
-     *   - Ensures complete method call tracing
-     * 
-     * PROCESS:
-     *   1. Extract class name and method name from signature
-     *   2. Call recursive search through inheritance chain
-     *   3. Return first matching method found
-     */
-    private static Optional<JavaSootMethod> findInheritedMethod(MethodSignature sig) {
-        String className = sig.getDeclClassType().getFullyQualifiedName();
-        String methodName = sig.getName();
-
-        // System.out.println("  [DEBUG] Looking for inherited method: " + methodName + " from class: " + className);
-        return findInheritedMethodRecursive(className, methodName);
-    }
-
-    /**
-     * Recursively searches inheritance chain for method
-     *
-     * FUNCTION NAME: findInheritedMethodRecursive
-     *
-     * USAGE:
-     *   Called internally by findInheritedMethod for recursive search
-     *
-     * INPUT REQUIRED:
-     *   - className: Class name to search in
-     *   - methodName: Method name to find
-     *
-     * WHAT IT'S USED FOR:
-     *   - Performs recursive search through class hierarchy
-     *   - Searches current class for method
-     *   - If not found, searches superclass recursively
-     *   - Handles single inheritance chains
-     *   - Provides detailed debug logging
-     *
-     * PROCESS:
-     *   1. Find class in Soot view
-     *   2. Search for method in current class
-     *   3. If found, return method
-     *   4. If not found and has superclass, search superclass
-     *   5. Continue until found or no more superclasses
-     */
-    private static Optional<JavaSootMethod> findInheritedMethodRecursive(String className, String methodName) {
-        for (JavaSootClass clazz : view.getClasses().collect(Collectors.toList())) {
-            if (clazz.getType().getFullyQualifiedName().equals(className)) {
-                // System.out.println("  [DEBUG] Searching in class: " + className);
-
-                for (JavaSootMethod method : clazz.getMethods()) {
-                    if (method.getName().equals(methodName)) {
-                        // System.out.println("  [DEBUG] Found method: " + method.getSignature());
-                        return Optional.of(method);
-                    }
-                }
-
-                if (clazz.hasSuperclass()) {
-                    String superClassName = clazz.getSuperclass().get().getFullyQualifiedName();
-                    // System.out.println("  [DEBUG] Method not found in " + className + ", checking superclass: " + superClassName);
-                    return findInheritedMethodRecursive(superClassName, methodName);
-                } else {
-                    // System.out.println("  [DEBUG] Class " + className + " has no superclass, method not found");
-                }
-                break;
-            }
-        }
-        return Optional.empty();
-    }
-
-    /**
-     * Builds human-readable string representation of method call path
-     * 
-     * FUNCTION NAME: buildPathString
-     * 
-     * USAGE:
-     *   Called internally to format call paths for output
-     * 
-     * INPUT REQUIRED:
-     *   - path: List of MethodSignature representing call chain
-     * 
-     * WHAT IT'S USED FOR:
-     *   - Converts method call path to readable string format
-     *   - Creates arrow-separated chain showing method calls
-     *   - Used in output files and console logging
-     *   - Provides clear visualization of call chains
-     * 
-     * PROCESS:
-     *   1. Iterate through method signatures in path
-     *   2. Join with " -> " separator
-     *   3. Return formatted string
-     */
-    private static String buildPathString(List<MethodSignature> path) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < path.size(); i++) {
-            if (i > 0) sb.append(" -> ");
-            sb.append(path.get(i));
-        }
-        return sb.toString();
-    }
-
-    private static void writeUniqueNativeMethodsToFile(String filename, Set<MethodSignature> nativeMethods) {
-        try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
-            writer.println("Unique native methods found:");
-            int count = 1;
-            for (MethodSignature sig : nativeMethods) {
-                writer.println(count + ". " + sig);
-                count++;
-            }
-            System.out.println("[INFO] Unique native methods written to " + filename);
-        } catch (IOException e) {
-            System.err.println("[ERROR] Failed to write unique native methods: " + e.getMessage());
-        }
-    }
-
-    private static void writeCallGraph(String filename) {
-        try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
-            writer.println("{");
-            writer.println("  \"nodes\": [");
-
-            // Collect all unique nodes (methods)
-            Set<String> allNodes = new HashSet<>();
-            allNodes.addAll(callGraph.keySet());
-            for (Set<String> callees : callGraph.values()) {
-                allNodes.addAll(callees);
-            }
-
-            List<String> nodeList = new ArrayList<>(allNodes);
-            for (int i = 0; i < nodeList.size(); i++) {
-                String node = nodeList.get(i);
-                String escapedNode = node.replace("\"", "\\\"").replace("\\", "\\\\");
-                writer.print("    {\"id\": \"" + escapedNode + "\"}");
-                if (i < nodeList.size() - 1) writer.println(",");
-                else writer.println();
-            }
-
-            writer.println("  ],");
-            writer.println("  \"edges\": [");
-
-            // Write edges
-            List<String> edges = new ArrayList<>();
-            for (Map.Entry<String, Set<String>> entry : callGraph.entrySet()) {
-                String caller = entry.getKey().replace("\"", "\\\"").replace("\\", "\\\\");
-                for (String callee : entry.getValue()) {
-                    String calleeEscaped = callee.replace("\"", "\\\"").replace("\\", "\\\\");
-                    edges.add("{\"from\": \"" + caller + "\", \"to\": \"" + calleeEscaped + "\"}");
-                }
-            }
-
-            for (int i = 0; i < edges.size(); i++) {
-                writer.print("    " + edges.get(i));
-                if (i < edges.size() - 1) writer.println(",");
-                else writer.println();
-            }
-
-            writer.println("  ]");
-            writer.println("}");
-
-            System.out.println("\n[INFO] Call graph written to: " + filename);
-            System.out.println("  Total nodes (methods): " + allNodes.size());
-            System.out.println("  Total edges (calls): " + edges.size());
-        } catch (IOException e) {
-            System.err.println("[ERROR] Failed to write call graph: " + e.getMessage());
-        }
-    }
-
-    private static void writeNativeMethodsByPackage(String filename, Set<MethodSignature> nativeMethods) {
-        try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
-            writer.println("Native methods organized by package:");
-            writer.println("Total native methods found: " + nativeMethods.size());
-            writer.println();
-
-            Map<String, List<MethodSignature>> methodsByPackage = new TreeMap<>();
-            for (MethodSignature sig : nativeMethods) {
-                String className = sig.getDeclClassType().getFullyQualifiedName();
-                String packageName = className.contains(".")
-                        ? className.substring(0, className.lastIndexOf('.'))
-                        : "(default package)";
-                methodsByPackage.computeIfAbsent(packageName, k -> new ArrayList<>()).add(sig);
-            }
-
-            for (Map.Entry<String, List<MethodSignature>> entry : methodsByPackage.entrySet()) {
-                String packageName = entry.getKey();
-                List<MethodSignature> methods = entry.getValue();
-
-                writer.println("=== Package: " + packageName + " ===");
-                writer.println("Methods: " + methods.size());
-                for (int i = 0; i < methods.size(); i++) {
-                    writer.println((i + 1) + ". " + methods.get(i));
-                }
-                writer.println();
-            }
-
-            System.out.println("[INFO] Native methods by package written to " + filename);
-        } catch (IOException e) {
-            System.err.println("[ERROR] Failed to write native methods by package: " + e.getMessage());
-        }
-    }
-
-    private static void writeMainCalledNativeMethods(String filename, List<JavaSootMethod> entryMethods, boolean allTargetMode) {
-        try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
-            if (allTargetMode) {
-                writer.println("Native methods called by all target methods (Mode 3):\n");
-            } else {
-                writer.println("Native methods called by main methods (with call paths):\n");
-            }
-
-            if (entryMethods.isEmpty()) {
-                writer.println("(No entry point methods found in target JARs.)");
-                System.out.println("\nResults written to: " + filename);
-                return;
-            }
-
-            if (allTargetMode) {
-                Set<MethodSignature> allNativesFound = new HashSet<>();
-                int pathCount = 0;
-                
-                for (JavaSootMethod method : entryMethods) {
-                    visited.clear();
-                    nativePaths.clear();
-                    foundNative.clear();
-
-                    List<MethodSignature> startPath = new ArrayList<>();
-                    startPath.add(method.getSignature());
-                    dfs(method.getSignature(), startPath);
-
-                    allNativesFound.addAll(foundNative);
-                    pathCount += nativePaths.size();
-                }
-
-                writer.println("Total entry points analyzed: " + entryMethods.size());
-                writer.println("Total unique native methods found: " + allNativesFound.size());
-                writer.println("Total paths found: " + pathCount);
-                writer.println("\nUnique native methods:");
-                int idx = 1;
-                for (MethodSignature sig : allNativesFound) {
-                    writer.println((idx++) + ". " + sig);
-                }
-                writer.println("\n[Note: Individual paths not shown in Mode 3 due to volume]");
-            } else {
-                for (int i = 0; i < entryMethods.size(); i++) {
-                    JavaSootMethod main = entryMethods.get(i);
-                    writer.println("=== Main Method " + (i + 1) + ": " + main.getSignature() + " ===");
-
-                    visited.clear();
-                    nativePaths.clear();
-                    foundNative.clear();
-
-                    List<MethodSignature> startPath = new ArrayList<>();
-                    startPath.add(main.getSignature());
-                    dfs(main.getSignature(), startPath);
-
-                    if (foundNative.isEmpty()) {
-                        writer.println("No native methods found for this main method.");
-                    } else {
-                        writer.println("Found " + nativePaths.size() + " paths to " + foundNative.size() + " native methods:");
-                        for (int j = 0; j < nativePaths.size(); j++) {
-                            writer.println("Path " + (j + 1) + ": " + buildPathString(nativePaths.get(j)));
-                        }
-                    }
-                    writer.println();
-                }
-            }
-            System.out.println("\nResults written to: " + filename);
-        } catch (IOException e) {
-            System.err.println("Error writing results: " + e.getMessage());
-        }
-    }
 
     /**
      * Utility class for HybridByteCodeTracer functionality
