@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/home/rupesh.punna/Prototype/SysPartCode/analysis/app/src/scripts/getsyscalls.py", line 176, in <module>
+    main()
+  File "/home/rupesh.punna/Prototype/SysPartCode/analysis/app/src/scripts/getsyscalls.py", line 168, in main
+    read_start_funcs(startfuncfile)
+  File "/home/rupesh.punna/Prototype/SysPartCode/analysis/app/src/scripts/getsyscalls.py", line 95, in read_start_funcs
+    with open(filename, 'r') as f:
+FileNotFoundError: [Errno 2] No such file or directory: '/home/rupesh.punna/Prototype/syscalls_BIN_jetty_9.4.58-jdk8-amazoncorretto/java/startfuncs_with_addr.txt'
