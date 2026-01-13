@@ -133,14 +133,8 @@ For each analyzed container (e.g., `cassandra`, `tomcat:8.5.56-jdk14-openjdk-ora
 
 #### Captured Artifacts (Boot Time)
 
-##### `BINARIES_<container>`
-Executables extracted during container boot time via `execve` system calls. These are the actual binaries that were executed during the container startup and runtime.
-
-##### `JARFILES_<container>`
-JAR files opened via `open`/`openat2` system calls during container execution. These represent Java archives that were accessed by the application.
-
-##### `LIBS_<container>`
-Shared libraries (`.so` files) opened via `open`/`openat2` system calls. These are the native libraries loaded by the JVM and application during runtime.
+##### `Extracted_Data`
+Executables extracted during container boot time via `execve` system calls. These are the actual binaries that were executed during the container startup and runtime. JAR files opened via `open`/`openat2` system calls during container execution. These represent Java archives that were accessed by the application. Shared libraries (`.so` files) opened via `open`/`openat2` system calls. These are the native libraries loaded by the JVM and application during runtime.
 
 #### Analysis Directories
 
