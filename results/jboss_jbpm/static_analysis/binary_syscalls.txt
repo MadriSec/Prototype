@@ -1,4 +1,4 @@
-ccess
+access
 bind
 brk
 chdir
