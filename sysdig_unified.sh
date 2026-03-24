@@ -274,7 +274,7 @@ for dir in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu /lib64 /usr/lib64 \
         [[ -z "$lib" ]] && continue
         real=$(container_realpath "$dir/$lib")
         dest="$LIBS_DIR/$(basename "$real")"
-        [[ -f "$dest" ]] && continue  # already copied by the main extract_files pass
+        [[ -f "$dest" ]] && continue
         if docker cp "$CONTAINER_ID:$real" "$LIBS_DIR/" 2>/dev/null; then
             nss_ok=$((nss_ok+1))
             # Preserve symlink name alongside the real filename
