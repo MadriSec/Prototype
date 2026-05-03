@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IN="${1:-method_syscalls.txt}"
-OUT="${2:-filtered_method_syscalls.txt}"
+# Determine output directory based on IMG_SAFE or OUTPUTS_DIR
+IMG_SAFE="${IMG_SAFE:-}"
+OUTPUTS_DIR="${OUTPUTS_DIR:-}"
+
+if [[ -n "$OUTPUTS_DIR" ]]; then
+    OUTPUT_BASE="$OUTPUTS_DIR"
+elif [[ -n "$IMG_SAFE" ]]; then
+    OUTPUT_BASE="outputs_${IMG_SAFE}"
+else
+    OUTPUT_BASE="."
+fi
+
+# Input defaults to method_syscalls.txt in the output directory
+IN="${1:-${OUTPUT_BASE}/mapped_method_syscalls.txt}"
+OUT="${2:-${OUTPUT_BASE}/filtered_method_syscalls.txt}"
 
 [[ -f "$IN" ]] || { echo "ERROR: input file '$IN' not found." >&2; exit 1; }
+
+echo "Filtering: $IN -> $OUT"
 
 # Remove CR if the file might be CRLF, drop NOT_FOUND lines, then drop blanks
 sed -e 's/\r$//' \

@@ -1,5 +1,5 @@
-package com.echotrace.app.bytecode_new;
 
+package com.echotrace.app.bytecode_new;
 import sootup.core.inputlocation.AnalysisInputLocation;
 import sootup.java.bytecode.frontend.inputlocation.JavaClassPathAnalysisInputLocation;
 import sootup.java.bytecode.frontend.inputlocation.DefaultRuntimeAnalysisInputLocation;
@@ -47,6 +47,7 @@ public class Mode4NativeScanner {
             System.err.println("Usage: java com.echotrace.app.bytecode_new.Mode4NativeScanner <target-directory> <dependencies-directory>");
             System.exit(1);
         }
+        
 
         String targetDir = args[0];
         String depsDir = args[1];
@@ -86,8 +87,9 @@ public class Mode4NativeScanner {
         System.out.println("Dependency classes indexed: " + dependencyClasses.size());
 
         try {
-            scanAllNativesMode4();
-            System.out.println("\n=== Mode 4 Complete ===");
+            // Use Sootup approach
+        scanAllNativesMode4();
+        System.out.println("\n=== Mode 4 Complete ===");
         } finally {
             // Clean up any remaining threads and resources
             cleanup();
@@ -96,6 +98,7 @@ public class Mode4NativeScanner {
         // Force exit to prevent Maven exec plugin thread issues
         System.exit(0);
     }
+    
     
     /**
      * Clean up resources and threads to prevent Maven exec plugin issues

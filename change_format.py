@@ -3,19 +3,25 @@
 import sys, argparse, re, os
 from collections import OrderedDict
 
-SPLIT_DIR_DEFAULT = "/home/rupesh.punna/Prototype/outputs"
+# Determine output directory based on IMG_SAFE or OUTPUTS_DIR environment variable
+img_safe = os.environ.get("IMG_SAFE", "").strip()
+outputs_dir_env = os.environ.get("OUTPUTS_DIR", "").strip()
+
+if outputs_dir_env:
+    SPLIT_DIR_DEFAULT = outputs_dir_env
+elif img_safe:
+    SPLIT_DIR_DEFAULT = f"outputs_{img_safe}"
+else:
+    SPLIT_DIR_DEFAULT = "outputs"
+
 FINAL_OUT_DEFAULT = "final.txt"
 
 env_lib_dirs = os.environ.get("LIB_DIRS")
 if env_lib_dirs:
     LIB_DIRS = [p for p in env_lib_dirs.split(os.pathsep) if p]
 else:
-    LIB_DIRS = [
-        "/home/rupesh.punna/Prototype/LIBS",
-        "/home/rupesh.punna/SWAT4J/",
-        "/usr/lib/jvm/java-8-openjdk-amd64/jre/lib/amd64/",
-        "/usr/lib/x86_64-linux-gnu/",
-    ]
+    # No hardcoded paths - rely on environment variables
+    LIB_DIRS = []
 
 def parse_lines(lines, debug=False, max_debug=20):
     """

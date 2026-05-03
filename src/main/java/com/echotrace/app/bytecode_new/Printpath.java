@@ -95,7 +95,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class Printpath {
     // Configuration for different project sizes
-    private static final int MAX_DEPTH = 30;    
+    private static final int MAX_DEPTH = 3000;    
     
     public static void main(String[] args) {
         if (args.length < 2) {

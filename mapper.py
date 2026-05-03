@@ -54,12 +54,18 @@ else:
     if lib_base:
         LIB_DIRS = [lib_base]
     else:
-        LIB_DIRS = [
-            "/home/rupesh.punna/Prototype/LIBS_solr_slim",
-            "/usr/lib/jvm/java-17-openjdk-amd64/lib",
-            "/usr/lib/jvm/java-8-openjdk-amd64/jre/lib/amd64/",
-            "/usr/lib/x86_64-linux-gnu/",
-        ]
+        sys.stderr.write(
+            "ERROR: No library directories configured.\n"
+            "Please set one of the following environment variables:\n"
+            "  - LIB_DIRS: colon-separated list of directories to scan for .so files\n"
+            "  - LIBS_IMAGE: single directory containing libraries for a specific container image\n"
+            "  - LIBS_DIR: single directory containing libraries\n"
+        )
+        sys.exit(1)
+
+if not LIB_DIRS:
+    sys.stderr.write("ERROR: LIB_DIRS is empty after configuration.\n")
+    sys.exit(1)
 
 print("DEBUG: Using LIB_DIRS:")
 for d in LIB_DIRS:
@@ -81,8 +87,8 @@ def resolve_methods_file():
     if env_methods:
         return env_methods
     if output_dir not in (".", ""):
-        return os.path.join(output_dir, "formatted_methods.txt")
-    return "formatted_methods.txt"
+        return os.path.join(output_dir, "native_methods.txt")
+    return "native_methods.txt"
 
 
 def ensure_methods_file(path: str):
@@ -90,7 +96,7 @@ def ensure_methods_file(path: str):
         return
     sys.stderr.write(
         f"ERROR: Methods file not found: {path}\n"
-        "Set METHODS_FILE or OUTPUTS_DIR to point to an existing formatted_methods.txt.\n"
+        "Set METHODS_FILE or OUTPUTS_DIR to point to an existing native_methods.txt.\n"
     )
     sys.exit(1)
 
@@ -100,7 +106,7 @@ methods_file = resolve_methods_file()
 ensure_methods_file(methods_file)
 
 # Outputs
-detailed_output_file = os.path.join(output_dir, "method_syscalls.txt")
+detailed_output_file = os.path.join(output_dir, "mapped_method_syscalls.txt")
 
 # ----------------------------
 # Helpers
@@ -136,30 +142,31 @@ def jni_to_java_method(jni_name: str):
         Convert a JNI (Java Native Interface) symbol name to its corresponding
         fully-qualified Java method name. JNI uses underscores to represent dots
         in package and class names, with special escaping for literal underscores.
-        
+
         WHY CONVERT JNI → JAVA (not the other way)?
-        
+
         Example scenario:
         - Input file has: "java.lang.System.nanoTime"
         - Binary library has: "Java_java_lang_System_nanoTime"
-        
+
         APPROACH 1 (What we do - FAST):
         Step 1: Scan ALL binaries → find ["Java_java_lang_System_nanoTime", ...]
         Step 2: Convert JNI→Java → {"java.lang.System.nanoTime": ("Java_java_lang_System_nanoTime", "lib.so")}
         Step 3: For each input method, do fast dict lookup: if "java.lang.System.nanoTime" in dict → FOUND!
         Result: O(1) lookup per method = FAST
-        
+
         APPROACH 2 (Alternative - SLOW):
         Step 1: For each input method "java.lang.System.nanoTime"
         Step 2: Convert Java→JNI → "Java_java_lang_System_nanoTime"
         Step 3: Search ALL binaries for this symbol (run nm on each .so file)
         Result: O(n*m) where n=methods, m=libraries = SLOW!
-        
+
         We choose Approach 1 because we scan binaries ONCE, then do fast lookups.
 
     Input:
-        jni_name (str): JNI symbol name (e.g., "Java_java_lang_System_nanoTime"
-                        or "Java_java_util_Map_Entry_getKey").
+        jni_name (str): JNI symbol name (e.g., "Java_java_lang_System_nanoTime",
+                        "Java_java_util_Map_00024Entry_getKey",
+                        "Java_com_sun_GTKEngine_native_1get_1gtk_1setting").
 
     Output:
         str | None: The fully-qualified Java method name (e.g., "java.lang.System.nanoTime")
@@ -169,13 +176,46 @@ def jni_to_java_method(jni_name: str):
         JNI symbols follow the pattern "Java_<package>_<class>_<method>" where:
         - Underscores represent dots in package/class names
         - "_1" is the escape sequence for a literal underscore character
-        - The function strips the "Java_" prefix, unescapes "_1" to "_", then
-          replaces remaining underscores with dots to reconstruct the Java method name.
+        - "_00024" is the escape for '$' (inner classes like Map$Entry)
+        - "_0xxxx" are Unicode escapes
+        - "_2" and "_3" are signature escapes for ';' and '['
+
+        The function properly handles the order of operations to preserve literal underscores
+        in method names while converting package separators to dots.
+
+        Examples:
+            Java_java_lang_System_nanoTime → java.lang.System.nanoTime
+            Java_java_util_Map_00024Entry_getKey → java.util.Map$Entry.getKey
+            Java_com_sun_GTKEngine_native_1get_1gtk_1setting → com.sun.GTKEngine.native_get_gtk_setting
     """
     if not jni_name.startswith("Java_"):
         return None
-    core = jni_name[5:].replace("_1", "_")
-    return core.replace("_", ".")
+
+    # Remove "Java_" prefix
+    mangled = jni_name[5:]
+
+    # Step 1: Handle Unicode escapes (_0xxxx -> Unicode character)
+    # Must be done BEFORE other replacements
+    def unescape_unicode(match):
+        hex_str = match.group(1)
+        code_point = int(hex_str, 16)
+        return chr(code_point)
+
+    mangled = re.sub(r'_0([0-9a-fA-F]{4})', unescape_unicode, mangled)
+
+    # Step 2: Handle escape sequences with temporary placeholders
+    # CRITICAL: Must do this BEFORE replacing _ with .
+    mangled = mangled.replace("_1", "\x00UNDERSCORE\x00")
+    mangled = mangled.replace("_2", ";")
+    mangled = mangled.replace("_3", "[")
+
+    # Step 3: Replace remaining underscores with dots (package/class separators)
+    mangled = mangled.replace("_", ".")
+
+    # Step 4: Restore literal underscores
+    mangled = mangled.replace("\x00UNDERSCORE\x00", "_")
+
+    return mangled
 
 def load_defined_symbols(so_path: str, pattern: str):
     """
@@ -414,7 +454,20 @@ def build_netty_map(lib_paths):
                             
                             if len(components) >= 2:
                                 # Handle different patterns
-                                if components[0] == 'unix' and len(components) >= 3:
+                                if components[0] == 'internal' and len(components) >= 4 and components[1] == 'tcnative':
+                                    # netty_internal_tcnative_Buffer_address -> io.netty.internal.tcnative.Buffer.address
+                                    # netty_internal_tcnative_SSLSession_JNI_OnLoad -> io.netty.internal.tcnative.SSLSession.JNI_OnLoad
+                                    # netty_internal_tcnative_NativeStaticallyReferencedJniMethods_sslErrorNone
+                                    #   -> io.netty.internal.tcnative.NativeStaticallyReferencedJniMethods.sslErrorNone
+                                    # Preserve original case from symbol (don't use .title())
+                                    class_name = components[2]
+                                    method_name = '_'.join(components[3:])  # Handle multi-part method names like JNI_OnLoad
+                                    java_method = f"io.netty.internal.tcnative.{class_name}.{method_name}"
+                                    netty_map[java_method] = (symbol, lib)
+                                    # Also add variant with "org.apache" prefix for shaded versions
+                                    java_method_shaded = f"org.apache.storm.shade.io.netty.internal.tcnative.{class_name}.{method_name}"
+                                    netty_map[java_method_shaded] = (symbol, lib)
+                                elif components[0] == 'unix' and len(components) >= 3:
                                     # netty_unix_socket_getOption -> io.netty.channel.unix.Socket.getOption
                                     java_method = f"io.netty.channel.unix.{components[1].title()}.{components[-1]}"
                                     netty_map[java_method] = (symbol, lib)
@@ -711,8 +764,16 @@ def scan_native_tables(src_root: str):
     if not src_root or not os.path.isdir(src_root):
         return jvm_map, reg_map
 
+    # FIXED: More flexible regex that allows C macros in signatures (e.g., OBJ, JSTRING)
+    # The signature part (?P<sig>[^,]+?) matches anything up to the next comma,
+    # which allows for string concatenation like "(" OBJ "I" OBJ "II)V"
     entry_rx = re.compile(
-        r'\{\s*"(?P<name>[A-Za-z0-9_]+)"\s*,\s*"(?:[^"]+)"\s*,\s*\(void\*\)\s*&(?P<target>[A-Za-z0-9_]+)\s*\}'
+        r'''\{\s*
+            "(?P<name>[A-Za-z0-9_]+)"\s*,\s*           # Method name
+            (?P<sig>[^,]+?)\s*,\s*                      # Signature (can include macros)
+            \(void\s*\*\)\s*&(?P<target>[A-Za-z0-9_]+) # Target function
+            \s*\}''',
+        re.VERBOSE
     )
 
     for root, _, files in os.walk(src_root):
@@ -734,8 +795,14 @@ def scan_native_tables(src_root: str):
                 use_class = clazz
                 if not use_class:
                     base = os.path.splitext(fn)[0]
-                    if base in ("Class", "System", "Thread"):
+                    # Common java.lang classes
+                    if base in ("Class", "System", "Thread", "ClassLoader", "Runtime", "Object",
+                                "String", "Throwable", "StackTraceElement", "ProcessEnvironment",
+                                "Package", "Module", "Float", "Double", "StrictMath"):
                         use_class = f"java.lang.{base}"
+                    # jdk.internal.misc classes
+                    elif base in ("VM", "Signal", "Unsafe"):
+                        use_class = f"jdk.internal.misc.{base}"
                     else:
                         continue
                 key = f"{use_class}.{name}"
@@ -787,10 +854,36 @@ with open(methods_file, "r", encoding="utf-8") as f:
     methods = [line.strip() for line in f if line.strip()]
 
 # ----------------------------
+# Step 4.5: Platform-exclusion keywords
+# ----------------------------
+# Methods containing these substrings are for non-Linux platforms and will
+# never execute inside a Linux container.  Tag them early so we skip the
+# expensive symbol lookups and keep them out of the "NOT_FOUND" bucket.
+PLATFORM_EXCLUDE_KEYWORDS = [
+    ".kqueue.",          # macOS/BSD kqueue API  (io.netty.channel.kqueue.*)
+    ".win32.",           # Windows APIs          (org.hyperic.sigar.win32.*)
+    "NativeLibraryDarwin",  # macOS Cassandra   (o.a.c.utils.NativeLibraryDarwin.*)
+    "BsdSocket.",        # BSD-specific Netty    (io.netty.channel.kqueue.BsdSocket.*)
+]
+
+def is_platform_excluded(method: str) -> str | None:
+    """Return the matched keyword if `method` is platform-specific, else None."""
+    for kw in PLATFORM_EXCLUDE_KEYWORDS:
+        if kw in method:
+            return kw
+    return None
+
+# ----------------------------
 # Step 5: Classify each method
 # ----------------------------
 with open(detailed_output_file, "w", encoding="utf-8") as out:
     for method in methods:  # e.g., "java.lang.System.nanoTime" from input file
+        # 0) Platform-excluded methods (win32, kqueue, Darwin)
+        excl_kw = is_platform_excluded(method)
+        if excl_kw:
+            out.write(f"{method}: PLATFORM_EXCLUDED ({excl_kw})\n")
+            continue
+
         # 1) JNI (Java_*) direct hits from binaries
         # FAST LOOKUP: Check if this Java method exists in our dictionary
         # (which we built by converting JNI symbols → Java method names)
@@ -814,7 +907,20 @@ with open(detailed_output_file, "w", encoding="utf-8") as out:
                 continue
 
         # 2) JVM_* via source tables
+        # Method format is "pkg.ClassmethodName()descriptor"
+        # jvm_method_map keys are "pkg.Class.methodName"
+        # Extract class and method name to build lookup key
         jvm_sym = jvm_method_map.get(method)
+        if not jvm_sym:
+            # Try to parse method string to extract class.methodName
+            # Find the last capital letter followed by a lowercase letter before '('
+            match = re.match(r'^(.+?)([a-z][a-zA-Z0-9_]*)\(', method)
+            if match:
+                class_part = match.group(1)  # e.g., "java.lang.System"
+                method_name = match.group(2)  # e.g., "nanoTime"
+                lookup_key = f"{class_part}.{method_name}"
+                jvm_sym = jvm_method_map.get(lookup_key)
+
         if jvm_sym:
             tag = "JVM"
             if libjvm_so and (jvm_sym not in available_jvm_symbols):

@@ -10,6 +10,10 @@ CNAME=$(docker inspect -f '{{.Name}}' "$CONTAINER_ID" | sed 's/^\///')
 CONTPID=$(docker inspect -f '{{.State.Pid}}' "$CONTAINER_ID")
 CG=$(awk -F: '/:\/docker\//{print $3} $0~/0::/{print $3}' /proc/$CONTPID/cgroup | head -1)
 
+# Derive a stable image name suffix for output dirs
+IMG_RAW=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_ID" 2>/dev/null || echo "$CNAME")
+IMG_SAFE=$(echo "$IMG_RAW" | tr '/:@' '___' | sed 's/[^A-Za-z0-9._-]/_/g')
+
 echo "Container Name: $CNAME"
 echo "Container PID: $CONTPID"
 echo "Container cgroup: $CG"
@@ -18,18 +22,22 @@ echo "------------------------------------------------------------"
 # --- STEP 2: Run sysdig to capture JAR/JMOD/module loads (60s) ---
 echo "Monitoring file open events for the Java application (60s)..."
 echo "Debug: Using cgroup filter: $CG"
-(timeout 60s sudo sysdig --modern-bpf \
+RAW_JARS="jars_loaded_raw.txt"
+JARS_OUT="jars_loaded.txt"
+sudo sysdig --modern-bpf -M 60 \
   "thread.cgroups contains \"$CG\" and evt.type in (open,openat,openat2) and (fd.name contains .jar or fd.name contains .jmod or fd.name contains /lib/modules or fd.name contains .class)" \
   -p "%evt.time %proc.name %fd.name" \
-  | sort -u > jars_loaded.txt) &
+  > "$RAW_JARS" 2>"${RAW_JARS}.err" &
 SYSDIG_JARS_PID=$!
 
 # --- STEP 3: Run sysdig to capture executed binaries (60s) ---
 echo "Monitoring executed binaries for 60s..."
-(timeout 60s sudo sysdig --modern-bpf \
+RAW_BIN="binaries_abs_raw.txt"
+BIN_OUT="binaries_abs.txt"
+sudo sysdig --modern-bpf -M 60 \
   "evt.type=execve and thread.cgroups contains \"$CG\"" \
   -p "%evt.arg.filename" \
-  | sort -u > binaries_abs.txt) &
+  > "$RAW_BIN" 2>"${RAW_BIN}.err" &
 SYSDIG_BIN_PID=$!
 
 # --- STEP 4: Give sysdig a head start ---
@@ -40,8 +48,20 @@ echo "Restarting container '$CNAME' to capture events..."
 docker restart "$CNAME"
 
 # --- STEP 6: Wait for sysdig sessions ---
-wait $SYSDIG_JARS_PID
-wait $SYSDIG_BIN_PID
+timeout 75s bash -c "wait $SYSDIG_JARS_PID" || { kill $SYSDIG_JARS_PID 2>/dev/null || true; }
+timeout 75s bash -c "wait $SYSDIG_BIN_PID" || { kill $SYSDIG_BIN_PID 2>/dev/null || true; }
+
+# Post-process unique outputs after capture completes
+if [ -s "$RAW_JARS" ]; then
+  sort -u "$RAW_JARS" > "$JARS_OUT"
+else
+  : > "$JARS_OUT"
+fi
+if [ -s "$RAW_BIN" ]; then
+  sort -u "$RAW_BIN" > "$BIN_OUT"
+else
+  : > "$BIN_OUT"
+fi
 
 echo "------------------------------------------------------------"
 echo "JAR monitoring completed. Checking results..."
@@ -88,7 +108,7 @@ cat binaries_abs.txt
 echo "------------------------------------------------------------"
 
 # --- STEP 7: Copy JAR/JMOD/module files ---
-DEST_DIR_JARS="/home/rupesh.punna/Prototype/JARFILES"
+DEST_DIR_JARS="/home/rupesh.punna/Prototype/JARFILES_${IMG_SAFE}"
 echo "Creating destination directory: $DEST_DIR_JARS"
 mkdir -p "$DEST_DIR_JARS"
 
@@ -102,7 +122,7 @@ for jar_path in $JAR_FILES; do
 done
 
 # --- STEP 8: Copy executed binaries ---
-DEST_DIR_BIN="/home/rupesh.punna/Prototype/BINARIES"
+DEST_DIR_BIN="/home/rupesh.punna/Prototype/BINARIES_${IMG_SAFE}"
 echo "Creating destination directory: $DEST_DIR_BIN"
 mkdir -p "$DEST_DIR_BIN"
 
