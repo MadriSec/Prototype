@@ -22,6 +22,7 @@ EchoTrace traces the path from Java bytecode through native method declarations,
 - [Dynamic Analysis (Sysdig / eBPF)](#dynamic-analysis-sysdig--ebpf)
 - [Container Artifact Extraction](#container-artifact-extraction)
 - [Finding Native Methods (Bytecode Analysis)](#finding-native-methods-bytecode-analysis)
+  - [Detector Documentation](src/main/java/com/echotrace/app/bytecode_new/README.md)
 - [Java Native Interface Types](#java-native-interface-types)
 - [Mapping Native Methods to Libraries](#mapping-native-methods-to-libraries)
 - [Binary Analysis with SysPart (VFA)](#binary-analysis-with-syspart-vfa)
@@ -140,7 +141,23 @@ Java applications call native code, but the `native` keyword in Java doesn't tel
 
 EchoTrace uses [SootUp](https://soot-oss.github.io/SootUp/) (the successor to Soot) to analyze Java bytecode. SootUp converts `.class` files to Jimple, a typed three-address intermediate representation, enabling interprocedural flow analysis.
 
-Two analysis modes are available:
+Each native interface type has a dedicated detector:
+
+| Type | Detector | Detection Strategy |
+|------|----------|-------------------|
+| JNI Static | `PrototypeFinal` | Scan for `ACC_NATIVE` modifier in bytecode |
+| JNI Dynamic | `JNIDyn` | Parse ELF `.so` for `JNI_OnLoad` + `RegisterNatives` |
+| JNA Interface | `JnaIfaceDetector` | BFS on `Library` interface hierarchy + taint `Native.load()` |
+| JNA Dynamic | `JnaDynDetector` | Taint `NativeLibrary.getInstance()` → `getFunction()` → `invoke()` |
+| JNA Direct | `JnaDirectMapDetector` | Find `Native.register()` in `<clinit>`, enumerate `native` methods |
+| Panama FFI | `FfiDetector` | Taint `SymbolLookup.libraryLookup()` → `find()` → `downcallHandle()` |
+| jnr-ffi | `JnrFfiDetector` | Find `LibraryLoader.create().library().load()`, enumerate interface methods |
+
+> For detailed documentation of each detector (Java patterns, output formats, limitations), see [`src/main/java/com/echotrace/app/bytecode_new/README.md`](src/main/java/com/echotrace/app/bytecode_new/README.md)
+
+### Analysis Modes
+
+Two entry-point strategies are available:
 
 | Mode | Entry Point | What It Finds |
 |------|-------------|---------------|
@@ -148,7 +165,7 @@ Two analysis modes are available:
 | **FinalPrototype** | `main()` methods | Only native methods reachable from application entry points (via call graph) |
 
 ```bash
-# Mode 1: All native methods
+# Mode 1: All native methods (over-approximate, sound)
 java -cp "target/echotrace-1.0-SNAPSHOT.jar:target/deps/*" \
   com.echotrace.app.bytecode_new.PrototypeFinal \
   <jar_dir> <jar_dir> --1
