@@ -82,7 +82,7 @@ The actual Java→C mapping is extracted by `jfr_registernative_mapping.sh` whic
 
 ---
 
-## 3. JNA Interface Mapping
+## 3. JNA Interface Mapping- [More Details](https://github.com/MadriSec/Prototype/blob/main/src/main/java/com/echotrace/app/bytecode_new/JNA_INTERFACE_DETECTION.md)
 
 **File:** `JnaIfaceDetector.java`
 
