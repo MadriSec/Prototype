@@ -51,6 +51,8 @@ EchoTrace combines **static analysis** of Java bytecode and ELF binaries with **
 ## Dynamic Analysis (Sysdig / eBPF)
 
 ### What We Monitor
+<img width="960" height="540" alt="sysdig" src="https://github.com/user-attachments/assets/8dec74d9-0557-4efd-810e-a07d03d61e94" />
+
 
 EchoTrace uses [Sysdig](https://github.com/draios/sysdig) with the modern eBPF driver (`--modern-bpf`) for low-overhead kernel-level tracing of running containers. Three categories of events are captured:
 
