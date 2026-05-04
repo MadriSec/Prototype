@@ -35,16 +35,132 @@ EchoTrace traces the path from Java bytecode through native method declarations,
 
 ## Architecture Overview
 
-EchoTrace combines **static analysis** of Java bytecode and ELF binaries with **dynamic analysis** using sysdig (eBPF) and a custom Java agent. The analysis pipeline has six stages:
+EchoTrace combines **dynamic observation** (kernel telemetry via eBPF), **static Java analysis** (which native surfaces exist and where they live in ELF), and **binary value-flow analysis** (which syscalls native code can reach). Together these produce a minimal **seccomp** allowlist.
+
+Architecturally there are **three pillars**, then policy synthesis:
+
+### 1. Dynamic analysis (eBPF)
+
+**Goal:** Learn which artifacts the workload *actually* touches — JARs, `.so` libraries, and executables — without guessing from the image filesystem.
+
+**How:** [Sysdig](https://github.com/draios/sysdig) runs on the host with the **modern eBPF** backend. It records **kernel-visible activity** from processes in the target container (`container.name=…`): syscall-backed **file operations** (`open` / `openat`, **`mmap`** / **`mmap2`**, `read` / `pread`) expose paths to loaded **JARs** and **shared libraries**; **`execve`** exposes **binaries** that were executed. Events are filtered for failures and deduplicated into path lists for libraries, jars, and binaries. **`mmap`**-backed evidence is treated as strongest proof a file was really loaded.
+
+**Extraction:** Those paths drive **targeted extraction** from the container filesystem (**`docker cp`**) into an offline workspace (**`JARFILES_*`**, **`LIBS_*`**, **`BINARIES_*`**) for later static phases.
+
+So: **eBPF-backed tracing gives syscall-level visibility → path lists → selective filesystem extraction**, not seccomp syscall enumeration yet.
+
+### 2. Bytecode analysis and mapping to libraries
+
+**Goal:** Enumerate **native methods** (every way Java can call native code) and attach each one to a **concrete `.so`** and **C entry symbol** for downstream binary analysis.
+
+**How — native-method extraction:** Offline JARs are analyzed with **SootUp / ASM** (`PrototypeFinal`, `FinalPrototype`). Dedicated detectors recover native boundaries per mechanism:
+
+| Mechanism | Role of detectors |
+|-----------|-------------------|
+| JNI (static `native`) | Bytecode scan for `ACC_NATIVE`; **`JNIDyn`** inspects ELF for **`JNI_OnLoad` / `RegisterNatives`** |
+| JNA | **`JnaIfaceDetector`**, **`JnaDynDetector`**, **`JnaDirectMapDetector`** |
+| Panama FFI | **`FfiDetector`** (taint `libraryLookup` → `find` → `downcallHandle`) |
+| jnr-ffi | **`JnrFfiDetector`** |
+
+Output centers on a **native-method list** (plus optional detector-specific side outputs).
+
+**How — mapping to the right library:** The **mapper** joins that list with ELF mirrors under **`LIBS_*`**: dynamic symbols (**`nm -D`**) match **`Java_*`** mangling (and vendor prefixes); **`ldd`** resolves transitive **`*.so`** dependencies when the defining library is not obvious; optional **`JVM_SRC`** parses OpenJDK **`JNINativeMethod`** tables for **`RegisterNatives`** registrations that do not follow **`Java_*`** names. **Filtering and formatting** refine output and emit **per-library start symbols** for SysPart.
+
+Optional adjuncts under **`analysis/app/src/dlanalysis/`** improve **`dlopen`** / **`RegisterNatives`** coverage using the same mirrors.
+
+### 3. Binary analysis (SysPart)
+
+**Goal:** From each relevant **ELF artifact** (shared libraries **and** extracted executables), compute which **Linux syscalls** are **reachable** by static analysis.
+
+**How:** An **analysis driver** runs **[SysPart](https://arxiv.org/abs/2309.05169)** **value-flow analysis (VFA)** on mirrored ELF under **`LIBS_*`** and **`BINARIES_*`**. **Start symbols** seed the call graph:
+
+- **Shared libraries (`.so`):** starts come from the **bytecode mapper** (resolved JNI / native entry symbols), or—when that path is unavailable—from **all exported dynamic symbols** on the library (`nm -D` style).
+- **Extracted binaries (executables):** starts come from their **exported symbol table** (dynamic exports suitable as entry surfaces), complementing pure **process entry** views (`_start` / `main`) where those modes are used.
+
+SysPart walks reachable code from those starts and collects **`syscall`** sites. Results are aggregated **per ELF** for the seccomp merge step.
+
+### Policy synthesis
+
+A **profile generator** merges syscall sets from every analyzed ELF (libraries **and** binaries) into **`seccomp.json`** (default deny, explicit allow). **`docker run --security-opt seccomp=…`** applies that profile back at runtime.
+
+---
+
+### Architecture diagram (three pillars)
+
+The figure is intentionally **linear** in pillars ① and ②; pillar **③** expands **SysPart** into explicit internal stages (still left-to-right flow inside that subgraph). The **offline mirror** feeds both mapping and binary analysis.
+
+```mermaid
+flowchart TB
+  RW["Docker workload — JVM loads jars / .so and runs binaries"]
+
+  subgraph P1["① Dynamic analysis — eBPF (Sysdig)"]
+    SD["Sysdig capture<br/>kernel trace, scoped to container"]
+    PL["Dedup path lists<br/>libraries · jars · binaries"]
+    EX["Filesystem extraction<br/>into offline workspace"]
+    SD --> PL --> EX
+  end
+
+  RW --> SD
+
+  M[(Offline mirror<br/>JARFILES · LIBS · BINARIES)]
+
+  EX --> M
+
+  subgraph P2["② Bytecode analysis + mapping"]
+    BC["SootUp / bytecode IR<br/>Java entry analyses"]
+    DET["Detectors · JNI · JNA · Panama · jnr"]
+    NM["Native method enumeration"]
+    MP["ELF / JDK mapper<br/>dynamic symbols · deps · optional JDK sources"]
+    PR["Normalize mapping<br/>start symbols per library"]
+    BC --> DET --> NM --> MP --> PR
+  end
+
+  M --> BC
+  M --> MP
+
+  subgraph P3["③ Binary analysis — SysPart (expanded)"]
+    ELFIN["Load ELF + dependency context<br/>LIBS · BINARIES mirror"]
+    CFG["Lift machine code<br/>per-function CFGs"]
+    BIND["Resolve entry addresses<br/>mapper starts · executable exports"]
+    FCG["Interprocedural traversal<br/>function-call graph from starts"]
+    VFA["Refine indirect edges<br/>value-flow analysis"]
+    SYH["Harvest syscall sites<br/>reachable syscall instructions"]
+    SC["Emit per-ELF results<br/>syscall sets · call graph · logs"]
+    ELFIN --> CFG --> BIND --> FCG --> VFA --> SYH --> SC
+    M --> ELFIN
+    PR --> BIND
+    EXSYM["Executable exported symbols<br/>→ extra start surfaces"]
+    M --> EXSYM --> BIND
+  end
+
+  OPA["Optional adjuncts<br/>dlopen / RegisterNatives helpers"]
+  M -.-> OPA
+
+  subgraph POL["Policy synthesis"]
+    GEN["Merge syscall sets"]
+    PROF["Seccomp profile JSON"]
+    GEN --> PROF
+  end
+
+  SC --> GEN
+
+  OUT["Apply seccomp profile<br/>at container runtime"]
+
+  PROF --> OUT
+
+  RA["Offline orchestration"]
+
+  RA -.-> BC
+```
 
 | Stage | Tool | Input | Output |
 |-------|------|-------|--------|
 | 1. Dynamic capture | Sysdig (eBPF) | Running container | Lists of loaded libraries, JARs, executables |
 | 2. Extraction | `docker cp` | Container filesystem | `LIBS/`, `JARFILES/`, `BINARIES/` directories |
-| 3. Bytecode analysis | SootUp + ASM | JAR files | `native_methods.txt` (fully-qualified native method list) |
-| 4. Library mapping | `mapper.py` + `nm` | Native methods + `.so` files | `mapped_method_syscalls.txt` (method-to-symbol-to-library) |
-| 5. Binary analysis | SysPart VFA | `.so` files + start functions | `syscalls.txt` per library (reachable syscalls) |
-| 6. Profile generation | `generate_seccomp.py` | Aggregated syscalls | `seccomp.json` |
+| 3. Bytecode analysis | SootUp + ASM | JAR files | Native method list (fully-qualified) |
+| 4. Library mapping | Mapper (`nm`, `ldd`, optional JDK sources) | Native methods + `.so` files | Mapped methods → symbols → libraries |
+| 5. Binary analysis | SysPart VFA | `.so` files + mapper starts; executables + **exported symbols** as starts | Syscall summaries per ELF (library or binary) |
+| 6. Profile generation | Seccomp profile generator | Aggregated syscalls | `seccomp.json` |
 
 ---
 
@@ -386,16 +502,35 @@ Each line gives: `library:java.method -> c_symbol [resolution_type]`
 
 ### What SysPart Does
 
-[SysPart](https://github.com/2over12/syspart) is a static binary analysis tool that performs **Value Flow Analysis (VFA)** on ELF binaries. Given a set of start functions (entry points into a library), SysPart traces all reachable code paths through the binary's call graph to determine which Linux system calls can be reached.
+[SysPart](https://arxiv.org/abs/2309.05169) ([CCS ’23](https://doi.org/10.1145/3576915.3623207)) is a research system for **binary-only** syscall surface reduction; at its core it builds **sound (conservative) control- and call-graph views** of x86-64 Linux ELF code and uses **value-flow analysis (VFA)** together with other static techniques to **refine the function-call graph (FCG)**—especially around **indirect calls** and **dynamically resolved targets**—before reasoning about which **syscall** sites are reachable.
+
+EchoTrace plugs into SysPart’s **static syscall computation** pipeline: we supply **ELF paths** (mirrored `.so` files and extracted executables) and **explicit start symbols** (from bytecode mapping, exported symbols, or entrypoints). SysPart then answers: *starting from those addresses, which syscall instructions can this binary reach?*
+
+### What SysPart Does Internally (per ELF)
+
+When analysis runs (via **`compute_syscalls.sh`** under your **`SysPartCode/analysis/app`** checkout, as invoked by **`automate_syscall_analysis.sh`**), the workflow is roughly:
+
+1. **Load & configure the binary.** The target ELF is loaded for analysis; **`USER_LIBRARY_PATH`** points SysPart at EchoTrace’s extracted **`LIBS_*`** tree so dependent shared objects resolve the same way as in the offline mirror.
+
+2. **Lift machine code to analyzable CFGs.** Functions are disassembled/lifted into **control-flow graphs (CFGs)** over basic blocks—the usual prerequisite for sound whole-program reasoning on stripped or partially stripped ELFs.
+
+3. **Resolve start addresses.** Each name in the start-function list is bound to an entry address (see **`startfuncs_with_addr.txt`** in the output bundle).
+
+4. **Explore an interprocedural call graph.** Analysis walks **reachable functions** outward from those starts: **direct calls** give precise edges; **indirect calls**, PLT/GOT behavior, and similar patterns are handled with conservative models that SysPart **tightens using VFA** (and related heuristics described in the paper) so the **FCG** is not blindly “every possible target.”
+
+5. **Collect syscall sites.** Along reachable paths SysPart identifies instructions that actually issue Linux syscalls—on x86-64 typically the **`syscall`** instruction once the syscall number is determined—and records those syscall numbers/names into **`syscalls.txt`**.
+
+6. **Emit diagnostics.** **`callgraph.json`** captures the explored call structure; **`allfunctions.txt`** lists reachable symbols encountered during the walk; **`logfile.txt`** captures warnings (unresolved jumps, missing symbols, etc.).
+
+This is **static** analysis: it does not require running the container during SysPart itself. Precision is bounded by reverse-engineering realities (opaque indirect jumps, hand-written asm, unusual loaders); EchoTrace optionally pulls **debug symbols** and alternate start-function modes (see below) to keep that gap smaller.
+
+### EchoTrace vs the Full SysPart Paper
+
+The published SysPart system also targets **temporal** syscall filtering for servers (initialization vs serving phases), combines analysis passes built on **Egalito**, and may use **dynamic** observations where static resolution of **`dlopen` / `dlsym`** is incomplete. EchoTrace’s integration focuses on the **same static backbone**—CFG/FCG construction with **VFA-informed** reachability— but drives it with **EchoTrace-derived entrypoints** and merges results into a **single Docker seccomp profile** over libraries *and* helper binaries. Treat the paper as the authoritative reference for algorithmic detail; treat this repo’s scripts as the **wiring** from Java bytecode → ELF mirrors → **`syscalls.txt`** → **`seccomp.json`**.
 
 ### How We Use It
 
-For each native library (`.so` file) identified by the mapper, EchoTrace:
-
-1. Takes the C function names from the mapper output as **start functions**
-2. Feeds them to SysPart along with the binary
-3. SysPart constructs a call graph via disassembly and VFA
-4. SysPart reports all `syscall` instructions reachable from those start functions
+EchoTrace runs SysPart **once per analyzed ELF**: **`automate_syscall_analysis.sh`** prepares start-function files (from the bytecode mapper, **`nm -D`** exports, or binary entrypoints depending on mode), sets **`USER_LIBRARY_PATH`** to the extracted library tree, and invokes **`SysPartCode/analysis/app/src/scripts/compute_syscalls.sh`** with the binary path, output directory, and start list.
 
 ```bash
 ./automate_syscall_analysis.sh \
