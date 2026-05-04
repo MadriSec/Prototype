@@ -87,27 +87,25 @@ A **profile generator** merges syscall sets from every analyzed ELF (libraries *
 
 ### Architecture diagram (three pillars)
 
-The figure is **top-down**. Pillar **③** uses one **merge node** after CFG lifting so mapper feeds and executable exports meet SysPart’s spine cleanly—this tends to render more consistently on **GitHub’s Mermaid** than multiple dashed links into mid-chain boxes. If your editor preview differs slightly, trust the **edge topology**, not pixel placement.
+Flow is **left → right**. Each pillar lives in its **own subgraph** so **dynamic**, **bytecode**, and **binary** analysis stay visually separated on GitHub (wide diagrams may scroll horizontally on small screens).
 
 ```mermaid
-flowchart TB
-  RW["Docker workload — JVM loads jars / .so and runs binaries"]
-
-  subgraph P1["① Dynamic analysis — eBPF (Sysdig)"]
+flowchart LR
+  subgraph dyn["① Dynamic analysis"]
     direction TB
+    RW["Docker workload — JVM loads jars / .so and runs binaries"]
     SD["Sysdig capture<br/>kernel trace, scoped to container"]
     PL["Dedup path lists<br/>libraries · jars · binaries"]
     EX["Filesystem extraction<br/>into offline workspace"]
-    SD --> PL --> EX
+    RW --> SD --> PL --> EX
   end
 
-  RW --> SD
+  subgraph mirror["Central mirror"]
+    direction TB
+    M[(JARFILES · LIBS · BINARIES)]
+  end
 
-  M[(Offline mirror<br/>JARFILES · LIBS · BINARIES)]
-
-  EX --> M
-
-  subgraph P2["② Bytecode analysis + mapping"]
+  subgraph bc["② Bytecode analysis"]
     direction TB
     RA["Offline orchestration<br/>skip capture when mirror exists"]
     BC["SootUp / bytecode IR<br/>Java entry analyses"]
@@ -119,10 +117,7 @@ flowchart TB
     BC --> DET --> NM --> MP --> PR
   end
 
-  M --> BC
-  M --> MP
-
-  subgraph P3["③ Binary analysis — SysPart (expanded)"]
+  subgraph bin["③ Binary analysis"]
     direction TB
     ELFIN["Load ELF + dependency context<br/>LIBS · BINARIES mirror"]
     CFG["Lift machine code<br/>per-function CFGs"]
@@ -131,28 +126,27 @@ flowchart TB
     VFA["Refine indirect edges<br/>value-flow analysis"]
     SYH["Harvest syscall sites<br/>reachable syscall instructions"]
     SC["Emit per-ELF results<br/>syscall sets · call graph · logs"]
-    ELFIN --> CFG --> RESOLVE --> FCG --> VFA --> SYH --> SC
-    PR --> RESOLVE
     EXSYM["Executable exported symbols"]
-    M --> ELFIN
-    M --> EXSYM --> RESOLVE
+    ELFIN --> CFG --> RESOLVE --> FCG --> VFA --> SYH --> SC
+    EXSYM --> RESOLVE
   end
 
-  subgraph POL["Policy synthesis"]
+  subgraph pol["Policy synthesis"]
     direction TB
     GEN["Merge syscall sets"]
     PROF["Seccomp profile JSON"]
-    GEN --> PROF
+    OUT["Apply seccomp profile<br/>at container runtime"]
+    GEN --> PROF --> OUT
   end
+
+  EX --> M --> BC
+  M --> ELFIN
+  M --> EXSYM
+  PR --> RESOLVE
+  SC --> GEN
 
   OPA["Optional adjuncts<br/>dlopen / RegisterNatives helpers"]
   M -.-> OPA
-
-  SC --> GEN
-
-  OUT["Apply seccomp profile<br/>at container runtime"]
-
-  PROF --> OUT
 ```
 
 | Stage | Tool | Input | Output |
