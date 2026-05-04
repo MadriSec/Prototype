@@ -18,7 +18,7 @@ EchoTrace traces the path from Java bytecode through native method declarations,
 
 ## Table of Contents
 
-- [Architecture Overview](#architecture-overview)
+- [Architecture Overview](#architecture-overview) — **[ARCHITECTURE.md](ARCHITECTURE.md)** (diagram only)
 - [Dynamic Analysis (Sysdig / eBPF)](#dynamic-analysis-sysdig--ebpf)
 - [Container Artifact Extraction](#container-artifact-extraction)
 - [Finding Native Methods (Bytecode Analysis)](#finding-native-methods-bytecode-analysis)
