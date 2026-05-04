@@ -27,7 +27,6 @@ EchoTrace traces the path from Java bytecode through native method declarations,
 - [Mapping Native Methods to Libraries](#mapping-native-methods-to-libraries)
 - [Binary Analysis with SysPart (VFA)](#binary-analysis-with-syspart-vfa)
 - [Seccomp Profile Generation](#seccomp-profile-generation)
-- [Runtime Validation](#runtime-validation)
 - [End-to-End Pipeline](#end-to-end-pipeline)
 - [Project Structure](#project-structure)
 - [Quick Start](#quick-start)
@@ -486,59 +485,6 @@ docker run --security-opt seccomp=seccomp_cassandra.json cassandra:latest
 
 ---
 
-## Runtime Validation
-
-### Purpose
-
-Static analysis is sound but over-approximate -- it predicts native methods that *could* be called, not those that *are* called during a real workload. Runtime validation measures how much of the static prediction is actually exercised.
-
-### DockerMonitoring Java Agent
-
-The `DockerMonitoring/agent` directory contains a Java agent that instruments native methods at class-load time:
-
-**How it works:**
-1. The agent uses `Instrumentation.setNativeMethodPrefix("$$dm$$_")` to tell the JVM about a prefix
-2. At class-load time, ASM bytecode rewriting renames `nativeFoo()` to `$$dm$$_nativeFoo()` (still native)
-3. A new Java wrapper `nativeFoo()` is injected that calls `NativeMethodTracker.recordInvocation()` then delegates to the renamed native
-4. The JVM strips the prefix when resolving the JNI symbol, so the original `.so` function still binds correctly
-
-**Key design decisions:**
-- `NativeMethodTracker` is loaded into the **bootstrap classloader** via an embedded mini-JAR, making it visible from all classloaders
-- `ConcurrentHashMap<String, LongAdder>` for lock-free, low-overhead counting (a few nanoseconds per call)
-- Periodic 30s flush to disk guards against SIGKILL from Docker
-- Shutdown hook for clean final dump
-- `/proc/self/maps` polling discovers mapped `.so` files at runtime
-
-### Running a Capture
-
-```bash
-./otel_capture.sh <container_name> <native_methods.txt> [duration_seconds]
-```
-
-The script:
-1. Inspects the original container's configuration via `docker inspect`
-2. Detects the correct JVM environment variable for the application (e.g., `CATALINA_OPTS` for Tomcat, `JVM_EXTRA_OPTS` for Cassandra)
-3. Reconstructs `docker run` with bind mounts for the agent and output directory
-4. Runs the instrumented container for the specified duration
-5. Gracefully stops and collects `runtime_native_methods.txt`
-
-### Validation Metrics
-
-```bash
-python3 validate_otel.py \
-  --static native_methods.txt \
-  --runtime runtime_native_methods.txt
-```
-
-| Metric | Formula | Meaning |
-|--------|---------|---------|
-| **Precision** | \|S n R\| / \|S\| | What fraction of static predictions were actually called |
-| **Coverage** | \|S n R\| / \|R\| | What fraction of runtime calls were predicted by static analysis |
-| **Over-approximation** | S - R | Methods predicted but not called (expected for sound analysis) |
-| **Undiscovered** | R - S | Methods called at runtime but missed by static analysis (false negatives) |
-
----
-
 ## End-to-End Pipeline
 
 ### Automated (Single Command)
@@ -568,11 +514,6 @@ python3 generate_seccomp.py \
   --input syscalls_output_cassandra_5.0.6/ \
   --output seccomp_cassandra.json
 
-# 5. (Optional) Validate with runtime capture
-./otel_capture.sh my-cassandra outputs_cassandra_5.0.6/native_methods.txt 120
-python3 validate_otel.py \
-  --static outputs_cassandra_5.0.6/native_methods.txt \
-  --runtime runtime_native_methods.txt
 ```
 
 ---
@@ -602,16 +543,10 @@ Prototype/
 
   # -- Dynamic Capture --
   sysdig_unified.sh              # eBPF-based library/JAR/binary capture
-  otel_capture.sh                # Java agent runtime native method capture
   extract_all_from_container.sh  # Full container artifact extraction
 
-  # -- DockerMonitoring Agent --
-  DockerMonitoring/
-    agent/                       # Java agent (ASM + setNativeMethodPrefix)
-
-  # -- Seccomp & Validation --
+  # -- Seccomp --
   generate_seccomp.py            # Syscall lists -> Docker seccomp JSON
-  validate_otel.py               # Static vs runtime comparison metrics
 
   # -- Orchestration --
   run_analysis.sh                # Bytecode -> mapping -> SysPart pipeline
@@ -644,9 +579,6 @@ Prototype/
 ```bash
 # Build the main analysis tool
 mvn clean package -DskipTests
-
-# Build the DockerMonitoring agent
-cd DockerMonitoring/agent && mvn clean package -DskipTests && cd ../..
 ```
 
 ### Run
