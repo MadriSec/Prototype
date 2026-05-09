@@ -18,7 +18,7 @@ Java applications reach native code through several interfaces. Each has a disti
 
 ---
 
-## 1. JNI Static Binding
+## 1. JNI Static Binding [Deep Dive](https://github.com/MadriSec/Prototype/blob/main/src/main/java/com/echotrace/app/bytecode_new/JNI_INTERFACE_DETECTION.md)
 
 **File:** `PrototypeFinal.java`, `Mode4NativeScanner.java`
 
@@ -82,7 +82,7 @@ The actual Java→C mapping is extracted by `jfr_registernative_mapping.sh` whic
 
 ---
 
-## 3. JNA Interface Mapping- [More Details](https://github.com/MadriSec/Prototype/blob/main/src/main/java/com/echotrace/app/bytecode_new/JNA_INTERFACE_DETECTION.md)
+## 3. JNA Interface Mapping- [Deep Dive](https://github.com/MadriSec/Prototype/blob/main/src/main/java/com/echotrace/app/bytecode_new/JNA_INTERFACE_DETECTION.md)
 
 **File:** `JnaIfaceDetector.java`
 
