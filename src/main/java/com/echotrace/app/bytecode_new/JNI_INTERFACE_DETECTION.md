@@ -114,6 +114,17 @@ When multiple JDKs are present, the test prints:
 - **JDK 8** totals are **much larger** than **JDK 9+ java.base-only** totals — `rt.jar` bundles more than one module’s worth of packages.
 - **Added** / **dropped** lines are **not** bugs by themselves; they reflect **platform**, **security**, and **Project Loom** refactors. They *are* early warning if your **`PrototypeFinal`** walk suddenly collapses (e.g. zero `java.lang.Object.hashCode`).
 
+**Example: same API, `native` in one JDK and not in another**
+
+Project Loom (**JDK 19+**) rewrote parts of **`java.lang.Thread`** so the **public** methods are ordinary Java that call **private** natives — the bytecode **`ACC_NATIVE` flag** moves off the historic names. Contrast:
+
+| Method (FQJN) | Typical JDK **8 – 18** (`java.base` bytecode) | JDK **19+** (Loom-style `java.base`) |
+|-----------------|-----------------------------------------------|--------------------------------------|
+| `java.lang.Thread.yield` | Declared **`native`** (`yield`) | **Not** `native` on the public method; implementation delegates to private natives (e.g. `yield0` / VM support) |
+| `java.lang.Thread.sleep(long)` / overloads | Public **`native sleep`** in older releases | Same story: public **`sleep`** is Java; work is routed through **virtual-thread** / carrier **scheduling** and **private** `native` helpers |
+
+So a **`native_methods.txt`** line (or absence of one) for **`java.lang.Thread.yield`** can **change** when you switch the staged **`RUNTIME_*`** from JDK 11 to JDK 21 — not because EchoTrace is wrong, but because the **class file** really changed. That is why the cross-JDK test prints **dropped** entries and why seccomp pipelines must pair analysis with the **same major** the container runs.
+
 *Example shape (numbers depend on your exact JDK builds):*
 
 ```text
@@ -131,10 +142,49 @@ When multiple JDKs are present, the test prints:
   JDK 8  (rt.jar) -> JDK 11 (java.base.jmod)
     added (12):
       + java.lang.invoke.VarHandle.acquireFence
-      ...
+      + java.lang.invoke.VarHandle.releaseFence
+      + java.lang.invoke.VarHandle.fullFence
+      + jdk.internal.misc.Unsafe.allocateUninitializedArray
+      + jdk.internal.util.string.StringConcatHelper.newArray
+      + jdk.internal.util.string.StringConcatHelper.newString
+      + jdk.internal.misc.ScopedMemoryAccess.getIntOpaqueInternal
+      + jdk.internal.misc.ScopedMemoryAccess.putIntOpaqueInternal
+      + jdk.internal.module.SystemModuleFinder.findModule
+      + java.lang.StrictMath.fma
+      + java.lang.Runtime.version0
+      + jdk.internal.jimage.ImageReader.read
+      
     dropped (1804):
       - java.applet.Applet.showStatus
+      - java.applet.Applet.resize
+      - java.applet.Applet.getDocumentBase
+      - java.applet.Applet.getAppletContext
+      - java.awt.Component.initIDs
+      - java.awt.Canvas.initIDs
+      - java.awt.Toolkit.initHW
+      - java.awt.GraphicsEnvironment.initDisplay
+      - java.sql.DriverManager.getConnection         (driver SPI moved to java.sql jmod)
+      - javax.swing.UIManager.initialize
+      - javax.swing.JComponent.initFocusTraversalKeys
+      - sun.applet.AppletViewer.panel.getToolkit
+      
+    (Many drops are **not** “removed from the JDK” — the same packages moved to **java.desktop**,
+     **java.sql**, **java.logging**, … and disappear from a **java.base-only** scan.)
+  JDK 11 (java.base.jmod) -> JDK 21 (java.base.jmod)
+    added (examples — Vector API / continuations plumbing / continued jdk.internal growth):
+      + jdk.internal.vm.vector.VectorSupport.fromBitsCoerced
+      + jdk.internal.vm.vector.VectorSupport.shuffleToVector
+      + jdk.internal.vm.vector.VectorSupport.unboxVector
+      + java.lang.Thread.wait0
+      + jdk.internal.vm.StackWalker.fetchStackFrames
+      + jdk.internal.vm.Continuation.pin
       ...
+    dropped (examples — often includes Loom-related `Thread` public API refactor):
+      - java.lang.Thread.yield
+      - java.lang.Thread.sleep
+      - java.lang.Thread.sleepNanos0
+      ...
+    (Exact FQNs vary by vendor tag; use the diff as a sanity signal, not a golden file.)
 ```
 
 ### 4.3 `PrototypeFinalCrossJdkAppAndRuntimeTest`
