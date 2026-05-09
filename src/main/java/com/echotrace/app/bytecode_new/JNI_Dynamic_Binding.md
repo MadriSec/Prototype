@@ -2,7 +2,7 @@
 
 This note describes **one** way EchoTrace recovers **JNI dynamic registrations**: bindings established with `RegisterNatives` and encoded as `JNINativeMethod[]` tables (method name, JNI type signature, native function pointer). That surface is **not** the same as scanning bytecode for `native` declarations—see [JNI_INTERFACE_DETECTION.md](./JNI_INTERFACE_DETECTION.md) for `ACC_NATIVE` and cross-JDK coverage.
 
-The work is implemented today as several Python helpers at the **repository root** (`extract_jni_bindings.py`, `extract_jvm_native_tables.py`, `extract_jfr_methods.py`, `extract_netty_epoll_native_methods.py`). They share the same **idea**; we plan to **merge** them into a single tool later. Until then, treat the following as **one pipeline** described once.
+The work is implemented today as **several small extractors** in the repository; they share the same **idea** and we plan to **merge** them into a single tool later. Until then, treat the following as **one pipeline** described once.
 
 ---
 
@@ -19,7 +19,7 @@ Our extractors target the second: each row is logically **`(name, signature, fn_
 2. A **JNI type signature** (another C string, normally starting with `(`).
 3. A **native code address** resolved to a **symbol** where possible (`nm`, or trust the source label).
 
-From that we can relate **Java FQCN + method + signature** to **ELF / HotSpot symbols**, which downstream mapping (seccomp, syscall tagging, `mapped_updated.py`, and friends) can consume alongside bytecode-derived `native_methods.txt`.
+From that we can relate **Java FQCN + method + signature** to **ELF / HotSpot symbols**, which downstream mapping (seccomp, syscall tagging, post-processing of `native_methods.txt`, and friends) can consume alongside bytecode-derived inventories.
 
 ---
 
@@ -59,12 +59,73 @@ Bytecode alone does not always tell you which `RegisterNatives` call owns a row;
 
 Output is **one registration per line** (exact formatting varies slightly today; the merge will normalize this). Conceptually each line answers: **which Java method (class.name(signature)) is implemented by which native symbol, from which library or OpenJDK component**, with a note on how we **proved** the link (high-confidence string match, symbol inference, or source scan).
 
+### Examples — same workflow, different anchors
+
+The steps above are the same; only the **artifact** and **how you find the first row** change. Below are the tables we usually mean when we say **JFR**, **Netty**, or **HotSpot / `libjvm`**.
+
+---
+
+#### JFR (`libjvm.so`, binary anchor)
+
+JFR registers dozens of natives onto **`jdk.jfr.internal.JVM`**. In a given **`libjvm.so`** build, HotSpot lays down a fixed **`JNINativeMethod[]`** (often in **`.data`**): each slot is still the usual **24-byte triple** of pointers.
+
+| What | Detail |
+|------|--------|
+| **Java class** | `jdk.jfr.internal.JVM` |
+| **Typical table** | One contiguous array of `JNINativeMethod` rows for JFR’s `RegisterNatives` bundle (not a separate symbol name you rely on in every distro—**the VMA / file offset is build-specific**). |
+| **How we anchor** | `readelf` / section map to turn a **known VMA** or **file offset** into the array start, then walk rows until a slot fails JNI validation. You pass the **`libjvm.so` path**, the **array’s file offset** (hex, e.g. `0x12c6f40` on one Cassandra/Tomcat-era build), and an optional **row cap** (often **~57** for JFR on that family of builds); the **offset must be rediscovered** for each `libjvm.so` you care about. |
+| **Example output shape** | `jdk.jfr.internal.JVM.<method><signature> → <native_symbol>` (stdout lines; stderr carries `#` comments). |
+
+So for JFR the “example table” is literally **`JNINativeMethod methods[]` for `jdk.jfr.internal.JVM`** inside **`libjvm.so`**, located by **offset**, not by mining every RELRO page.
+
+---
+
+#### Netty transport (`.so`, symbol anchor)
+
+Netty’s C sources name static arrays that become symbols in **`libnetty_transport_native_epoll_*.so`**, **`libnetty_transport_native_io_uring_*.so`**, and related bundles. We **`nm -n`** those libraries and grep for the array symbol, map VMA → file offset, then decode the same **24-byte** rows.
+
+| Array symbol (C source) | Typical Java class |
+|-------------------------|-------------------|
+| **`fixed_method_table`** (`transport-native-epoll/.../netty_epoll_native.c`) | `io.netty.channel.epoll.Native` |
+| **`statically_referenced_fixed_method_table`** (epoll static JNI) | `io.netty.channel.epoll.NativeStaticallyReferencedJniMethods` |
+| **`statically_referenced_fixed_method_table`** (`.../netty_unix_limits.c`) | `io.netty.channel.unix.LimitsStaticallyReferencedJniMethods` |
+| **`statically_referenced_fixed_method_table`** (`transport-native-io_uring/.../netty_io_uring_native.c`) | `io.netty.channel.uring.NativeStaticallyReferencedJniMethods` |
+
+**Example discovery** (conceptual):
+
+```text
+nm -n libnetty_transport_native_epoll_x86_64.so | grep -E 'fixed_method_table|statically_referenced_fixed_method_table'
+```
+
+Then supply the chosen **VMA** (or resolved **symbol** for the array), a **max row count**, and the expected **Java FQN** for that table; overshooting the row cap is fine—the walk **stops at the first invalid triple**.
+
+---
+
+#### HotSpot JVM (OpenJDK **source**, table literals)
+
+For the VM’s own natives we often **skip guessing in the binary** and read **`JNINativeMethod methods[] = { … }`** straight out of the OpenJDK tree. Each brace entry is still **name + JNI signature + native target** (`JVM_*`, `Unsafe_*`, etc.).
+
+**Example table shapes in source:**
+
+```c
+// hotspot/share/prims/jvm.cpp, libjava java_lang_Thread.c, etc.
+static JNINativeMethod methods[] = {
+    {"start0", "()V", (void *)&JVM_StartThread},
+    {"isAlive", "()Z", (void *)&JVM_IsThreadAlive},
+    ...
+};
+```
+
+**Special case — `nativeLookup.cpp`:** the table **`lookup_special_native_methods[]`** does *not* use short Java names in the first column; each `"name"` is a **`Java_<mangled>_registerNatives`** string, and we **demangle** it back to classes like **`jdk.internal.misc.Unsafe`**, **`jdk.jfr.internal.JVM`**, **`java.lang.Class`**, … so you still get **class + `registerNatives` + handler symbol** rows consistent with the pipe-oriented output used for merging with other extractors.
+
+**Emit shape (typical):** `libjvm.so|<JavaFQN>|<jniSig>|<C_symbol>|SRC_SCAN` — same **logical** fields as ELF mining, but **provenance** is **source parse**, not RELRO.
+
 ---
 
 ## What this is not
 
 - **Not a substitute for running the JVM** — we do not execute `JNI_OnLoad` or follow dynamic `malloc`’d tables built at runtime.
-- **Not guaranteed on odd ABIs** — the tools assume LP64 triples and sensible RELRO / section metadata; fully relocated or pathological binaries may not yield tables.
+- **Not guaranteed on odd ABIs** — we assume LP64 triples and sensible RELRO / section metadata; fully relocated or pathological binaries may not yield tables.
 - **Not identical to HotSpot’s `JVM_*` catalog** — that catalog is partly maintained in C++ source; source extraction aligns with it, while generic `.so` mining discovers **vendor** registrations the VM never lists.
 
 ---
@@ -74,12 +135,11 @@ Output is **one registration per line** (exact formatting varies slightly today;
 | Topic | Location |
 |------|----------|
 | Bytecode `native` scan + cross-JDK tests | [JNI_INTERFACE_DETECTION.md](./JNI_INTERFACE_DETECTION.md) |
-| Implementation (to be merged) | `extract_jni_bindings.py`, `extract_jvm_native_tables.py`, `extract_jfr_methods.py`, `extract_netty_epoll_native_methods.py` (repository root) |
-| Design notes for the ELF miner | `JNI_DYNAMIC_EXTRACTOR_PLAN` (referenced from `extract_jni_bindings.py` docstring) |
+| ELF / RELRO table mining (generic `.so`) | Design notes kept alongside the repository extractors |
 
 ---
 
 ## Summary
 
-**JNI dynamic binding** extraction means: **locate `JNINativeMethod[]`-shaped data**, **decode pointers into Java names and JNI signatures**, **resolve function pointers to symbols**, and **label the owning Java class**—whether the evidence comes from **RELRO in a `.so`**, **a known array anchor in `libjvm.so`**, **Netty’s transport tables**, or **OpenJDK C++ sources**. The current scripts are **split for historical reasons**; operationally they implement **one** recovery strategy with different **inputs and anchors**.
+**JNI dynamic binding** extraction means: **locate `JNINativeMethod[]`-shaped data**, **decode pointers into Java names and JNI signatures**, **resolve function pointers to symbols**, and **label the owning Java class**—whether the evidence comes from **RELRO in a `.so`**, **a known array anchor in `libjvm.so`**, **Netty’s transport tables**, or **OpenJDK C++ sources**. Today’s extractors are **split for historical reasons**; together they implement **one** recovery strategy with different **inputs and anchors**.
 
