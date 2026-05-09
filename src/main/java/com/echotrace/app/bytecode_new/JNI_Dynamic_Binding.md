@@ -76,7 +76,28 @@ JFR registers dozens of natives onto **`jdk.jfr.internal.JVM`**. In a given **`l
 | **How we anchor** | `readelf` / section map to turn a **known VMA** or **file offset** into the array start, then walk rows until a slot fails JNI validation. You pass the **`libjvm.so` path**, the **array’s file offset** (hex, e.g. `0x12c6f40` on one Cassandra/Tomcat-era build), and an optional **row cap** (often **~57** for JFR on that family of builds); the **offset must be rediscovered** for each `libjvm.so` you care about. |
 | **Example output shape** | `jdk.jfr.internal.JVM.<method><signature> → <native_symbol>` (stdout lines; stderr carries `#` comments). |
 
-So for JFR the “example table” is literally **`JNINativeMethod methods[]` for `jdk.jfr.internal.JVM`** inside **`libjvm.so`**, located by **offset**, not by mining every RELRO page.
+**Example table shapes in source:** HotSpot builds this table in **`jfrJniMethodRegistration.cpp`**; the **binary anchor** in `libjvm.so` is the same logical rows after link/relocation.
+
+```c
+// hotspot/share/jfr/jni/jfrJniMethodRegistration.cpp (abbreviated)
+JfrJniMethodRegistration::JfrJniMethodRegistration(JNIEnv* env) {
+  jclass jfr_clz = env->FindClass("jdk/jfr/internal/JVM");
+  if (jfr_clz != NULL) {
+    JNINativeMethod method[] = {
+      (char*)"beginRecording", (char*)"()V", (void*)jfr_begin_recording,
+      (char*)"isRecording", (char*)"()Z", (void*)jfr_is_recording,
+      (char*)"endRecording", (char*)"()V", (void*)jfr_end_recording,
+      (char*)"counterTime", (char*)"()J", (void*)jfr_elapsed_counter,
+      (char*)"getPid", (char*)"()Ljava/lang/String;", (void*)jfr_get_pid,
+      ...
+    };
+    env->RegisterNatives(jfr_clz, method,
+        (jint)(sizeof(method) / sizeof(JNINativeMethod)));
+  }
+}
+```
+
+`nativeLookup.cpp` also lists the **`Java_jdk_jfr_internal_JVM_registerNatives`** stub (see **JVM** example below) that points at the C entry **`jfr_register_natives`**, which is how this table gets wired during VM startup.
 
 ---
 
@@ -90,6 +111,27 @@ Netty’s C sources name static arrays that become symbols in **`libnetty_transp
 | **`statically_referenced_fixed_method_table`** (epoll static JNI) | `io.netty.channel.epoll.NativeStaticallyReferencedJniMethods` |
 | **`statically_referenced_fixed_method_table`** (`.../netty_unix_limits.c`) | `io.netty.channel.unix.LimitsStaticallyReferencedJniMethods` |
 | **`statically_referenced_fixed_method_table`** (`transport-native-io_uring/.../netty_io_uring_native.c`) | `io.netty.channel.uring.NativeStaticallyReferencedJniMethods` |
+
+**Example table shapes in source:** **Epoll** ships two static tables—the first is registered onto **`NativeStaticallyReferencedJniMethods`**, the second is copied into a **`malloc`**’d table (plus dynamic signatures) for **`Native`**.
+
+```c
+// transport-native-epoll/src/main/c/netty_epoll_native.c (Netty 4.1, abbreviated)
+
+static const JNINativeMethod statically_referenced_fixed_method_table[] = {
+ { "epollet", "()I", (void *) netty_epoll_native_epollet },
+ { "epollin", "()I", (void *) netty_epoll_native_epollin },
+ { "epollout", "()I", (void *) netty_epoll_native_epollout },
+ ...
+};
+
+static const JNINativeMethod fixed_method_table[] = {
+ { "eventFd", "()I", (void *) netty_epoll_native_eventFd },
+ { "timerFd", "()I", (void *) netty_epoll_native_timerFd },
+ { "epollCreate", "()I", (void *) netty_epoll_native_epollCreate },
+ { "epollWait0", "(IJIIIIJ)J", (void *) netty_epoll_native_epollWait0 },
+ ...
+};
+```
 
 **Example discovery** (conceptual):
 
@@ -105,18 +147,50 @@ Then supply the chosen **VMA** (or resolved **symbol** for the array), a **max r
 
 For the VM’s own natives we often **skip guessing in the binary** and read **`JNINativeMethod methods[] = { … }`** straight out of the OpenJDK tree. Each brace entry is still **name + JNI signature + native target** (`JVM_*`, `Unsafe_*`, etc.).
 
-**Example table shapes in source:**
+**Example table shapes in source — libjava (`java.lang.Thread`):**
 
 ```c
-// hotspot/share/prims/jvm.cpp, libjava java_lang_Thread.c, etc.
+// java.base/share/native/libjava/Thread.c (JDK 17; member list varies by release)
+#define THD "Ljava/lang/Thread;"
+#define OBJ "Ljava/lang/Object;"
+
 static JNINativeMethod methods[] = {
-    {"start0", "()V", (void *)&JVM_StartThread},
-    {"isAlive", "()Z", (void *)&JVM_IsThreadAlive},
+    {"start0",        "()V",        (void *)&JVM_StartThread},
+    {"stop0",         "(" OBJ ")V", (void *)&JVM_StopThread},
+    {"suspend0",      "()V",        (void *)&JVM_SuspendThread},
+    {"setPriority0",  "(I)V",       (void *)&JVM_SetThreadPriority},
+    {"yield",         "()V",        (void *)&JVM_Yield},
+    {"sleep",         "(J)V",       (void *)&JVM_Sleep},
+    {"currentThread", "()" THD,     (void *)&JVM_CurrentThread},
     ...
+};
+
+JNIEXPORT void JNICALL
+Java_java_lang_Thread_registerNatives(JNIEnv *env, jclass cls)
+{
+    (*env)->RegisterNatives(env, cls, methods, ARRAY_LENGTH(methods));
+}
+```
+
+**Example table shapes in source — `nativeLookup` (JNI-mangled `registerNatives` stubs):**
+
+```c
+// hotspot/share/prims/nativeLookup.cpp (abbreviated; signatures are NULL in the table)
+
+static JNINativeMethod lookup_special_native_methods[] = {
+  { CC"Java_jdk_internal_misc_Unsafe_registerNatives",
+      NULL, FN_PTR(JVM_RegisterJDKInternalMiscUnsafeMethods) },
+  { CC"Java_java_lang_invoke_MethodHandleNatives_registerNatives",
+      NULL, FN_PTR(JVM_RegisterMethodHandleMethods) },
+#if INCLUDE_JFR
+  { CC"Java_jdk_jfr_internal_JVM_registerNatives",
+      NULL, FN_PTR(jfr_register_natives) },
+#endif
+  ...
 };
 ```
 
-**Special case — `nativeLookup.cpp`:** the table **`lookup_special_native_methods[]`** does *not* use short Java names in the first column; each `"name"` is a **`Java_<mangled>_registerNatives`** string, and we **demangle** it back to classes like **`jdk.internal.misc.Unsafe`**, **`jdk.jfr.internal.JVM`**, **`java.lang.Class`**, … so you still get **class + `registerNatives` + handler symbol** rows consistent with the pipe-oriented output used for merging with other extractors.
+Rows here use **`Java_<mangled>_registerNatives`** as the *name* field; we **demangle** those strings back to classes like **`jdk.internal.misc.Unsafe`**, **`jdk.jfr.internal.JVM`**, **`java.lang.invoke.MethodHandleNatives`**, … so you still get **class + `registerNatives` + handler symbol** lines consistent with merging next to libjava-style tables.
 
 **Emit shape (typical):** `libjvm.so|<JavaFQN>|<jniSig>|<C_symbol>|SRC_SCAN` — same **logical** fields as ELF mining, but **provenance** is **source parse**, not RELRO.
 
