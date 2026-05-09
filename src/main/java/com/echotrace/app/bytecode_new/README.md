@@ -46,7 +46,7 @@ java.lang.System.nanoTime  →  Java_java_lang_System_nanoTime (in libjava.so)
 
 ---
 
-## 2. JNI Dynamic Binding (RegisterNatives)
+## 2. JNI Dynamic Binding [RegisterNatives](https://github.com/MadriSec/Prototype/blob/main/src/main/java/com/echotrace/app/bytecode_new/JNI_Dynamic_Binding.md)
 
 **File:** `JNIDyn.java`
 
