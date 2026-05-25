@@ -68,18 +68,6 @@ JNIEXPORT void JNI_OnLoad(JavaVM *vm, void *reserved) {
 3. Scan raw bytes for the string `"RegisterNatives"` (indicates the library calls it)
 4. Cross-reference with native methods from Step 1 to identify which methods are dynamically bound
 
-**Signal levels:**
-- `HIGH` — Both `RegisterNatives` string AND `JNI_OnLoad` exported symbol present
-- `MEDIUM` — `RegisterNatives` string present, `JNI_OnLoad` not exported
-- `LOW` — `JNI_OnLoad` present but no `RegisterNatives` string
-
-**Output:** `jni_dynamic_report.txt`
-
-**Resolution:**
-The actual Java→C mapping is extracted by `jfr_registernative_mapping.sh` which disassembles the `.so` to recover the `JNINativeMethod[]` array contents (method name, signature, function pointer).
-
-**Limitations:** Only works on non-stripped binaries with intact symbol tables. Pointer-based entries where the method name/sig aren't string literals cannot be resolved statically.
-
 ---
 
 ## 3. JNA Interface Mapping- [Deep Dive](https://github.com/MadriSec/Prototype/blob/main/src/main/java/com/echotrace/app/bytecode_new/JNA_INTERFACE_DETECTION.md)
