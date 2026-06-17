@@ -48,9 +48,10 @@ import time
 # ----------------------------
 # Config / Inputs
 # ----------------------------
-# Project root is the directory containing this script (e.g. /home/rupesh.punna/EchoTrace).
+# Project root is the repository root, even when this helper lives under scripts/.
 # Used to render LIBS_<IMG_SAFE>/libfoo.so as a project-relative path in the output.
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR) == "scripts" else SCRIPT_DIR
 
 env_lib_dirs = os.environ.get("LIB_DIRS")
 if env_lib_dirs:
@@ -96,8 +97,7 @@ def normalize_lib_dirs(lib_dirs: list) -> list:
     return normalized
 
 JVM_SRC = os.environ.get("JVM_SRC",
-                         os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                      ".tmp_jdk8_native/jdk/src/share/native"))
+                         os.path.join(PROJECT_ROOT, ".tmp_jdk8_native/jdk/src/share/native"))
 JVM_SRC_NORM = os.path.expanduser((JVM_SRC or "").strip().strip('"').strip("'"))
 JVM_SO  = os.environ.get("JVM_SO", "")
 output_dir = os.environ.get("OUTPUTS_DIR", ".").strip() or "."
@@ -1175,7 +1175,7 @@ def _auto_extract_jni_bindings(libs_dir: str, output_dir_path: str) -> bool:
     if not libs_dir or not os.path.isdir(libs_dir):
         return False
 
-    script_path = os.path.join(PROJECT_ROOT, "extract_jni_bindings.py")
+    script_path = os.path.join(SCRIPT_DIR, "extract_jni_bindings.py")
     if not os.path.isfile(script_path):
         print(f"INFO: extract_jni_bindings.py not found at {script_path}; "
               f"skipping JNI auto-extraction.")
@@ -1733,7 +1733,7 @@ def alias_tag(original: str, lookup: str) -> str:
 
 
 # Render the owning library so that anything inside the project tree
-# (e.g. /home/rupesh.punna/EchoTrace/LIBS_cassandra_5.0.6-bookworm/libnetty_...so)
+# (e.g. <repo>/LIBS_cassandra_5.0.6-bookworm/libnetty_...so)
 # becomes a project-relative path (LIBS_cassandra_5.0.6-bookworm/libnetty_...so),
 # while system / ldd-resolved libs (e.g. /lib/x86_64-linux-gnu/libpthread.so.0)
 # stay as bare basenames.

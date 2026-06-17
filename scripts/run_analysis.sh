@@ -1,7 +1,10 @@
 #!/bin/bash
 set -e  # stop if any command fails
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 #IMG_SAFE=cassandra_3.0.29 \
-#LIBS_DIR=/home/rupesh.punna/Prototype/LIBS_cassandra_3.0.29 \
+#LIBS_DIR=${SCRIPT_DIR}/LIBS_cassandra_3.0.29 \
 #  bash run_analysis.sh
 ANALYSIS_MODE="${ANALYSIS_MODE:-FULL_BYTECODE}"
 
@@ -11,8 +14,9 @@ if [ -z "${IMG_SAFE:-}" ]; then
     exit 1
 fi
 
-LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-/home/rupesh.punna/Prototype/LIBS_${IMG_SAFE}}}"
-OUTPUTS_BASE_DIR="${OUTPUTS_DIR:-/home/rupesh.punna/Prototype/outputs_${IMG_SAFE}}"
+LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-${PROJECT_ROOT}/LIBS_${IMG_SAFE}}}"
+OUTPUTS_BASE_DIR="${OUTPUTS_DIR:-${PROJECT_ROOT}/outputs_${IMG_SAFE}}"
+RUNTIME_BASE_DIR="${RUNTIME_DIR:-${PROJECT_ROOT}/RUNTIME_${IMG_SAFE}}"
 mkdir -p "$OUTPUTS_BASE_DIR"
 
 if [ "$ANALYSIS_MODE" = "FULL_BYTECODE" ]; then
@@ -26,78 +30,36 @@ if [ "$ANALYSIS_MODE" = "FULL_BYTECODE" ]; then
         echo "============================================================"
         echo " STEP 1: Running bytecode analysis"
         echo "============================================================"
-        JAR_BASE_DIR="${JARFILES_DIR:-/home/rupesh.punna/Prototype/JARFILES_${IMG_SAFE}}"
+        JAR_BASE_DIR="${JARFILES_DIR:-${PROJECT_ROOT}/JARFILES_${IMG_SAFE}}"
 
-        echo "Select bytecode analysis mode:"
-        echo "  1) PrototypeFinal  - Include ALL native methods"
-        echo "  2) FinalPrototype  - Start from main (reachability analysis)"
-        read -p "Enter choice [1/2]: " BYTECODE_MODE
+        BYTECODE_MODE="${BYTECODE_MODE:-1}"
+        echo "Bytecode analysis mode: $BYTECODE_MODE"
 
         if [ "$BYTECODE_MODE" = "2" ]; then
             echo "Running FinalPrototype (start from main)..."
-            java -cp "target/echotrace-1.0-SNAPSHOT.jar:target/deps/*" \
+            java -cp "${PROJECT_ROOT}/target/echotrace-1.0-SNAPSHOT.jar:${PROJECT_ROOT}/target/deps/*" \
               com.echotrace.app.bytecode_new.FinalPrototype \
               "${JAR_BASE_DIR}" \
               "${JAR_BASE_DIR}" \
               --1
         else
-            echo "Running PrototypeFinal (all native methods)..."
-            sudo mvn exec:java \
-              -Dexec.mainClass="com.echotrace.app.bytecode_new.PrototypeFinal" \
-              -Dexec.args="${JAR_BASE_DIR} ${JAR_BASE_DIR} --1"
+            echo "Running JNADetector (JNA/JNR/FFI + all native methods)..."
+            mvn -f "${PROJECT_ROOT}/pom.xml" -q clean compile exec:java \
+              -Dexec.mainClass=com.echotrace.app.bytecode_new.JNADetector \
+              -Dexec.args="${JAR_BASE_DIR} ${OUTPUTS_BASE_DIR} ${RUNTIME_BASE_DIR}"
         fi
     fi
 
     # echo "============================================================"
     # echo " STEP 2: Running formatter.py"
     # echo "============================================================"
-    # python3 /home/rupesh.punna/Prototype/formatter.py
+    # python3 ${SCRIPT_DIR}/formatter.py
 
     echo "============================================================"
-    echo " STEP 1.5: JFR RegisterNatives extraction (libjvm.so)"
+    echo " STEP 2: Native mapping and start-function preparation"
     echo "============================================================"
-    # Find libjvm.so in the LIBS directory and extract JFR RegisterNatives bindings.
-    # Output: jfr_extracted_methods.txt (consumed by mapped_updated.py step 1.8)
-    LIBJVM_PATH=$(find "${LIBS_BASE_DIR}" -name "libjvm.so" -type f 2>/dev/null | head -1)
-    if [ -n "$LIBJVM_PATH" ]; then
-        echo "Found libjvm.so: $LIBJVM_PATH"
-        JFR_OUTPUT="${OUTPUTS_BASE_DIR}/jfr_extracted_methods.txt"
-        if bash /home/rupesh.punna/Prototype/jfr_registernative_mapping.sh "$LIBJVM_PATH" 2>/dev/null; then
-            # Move the output to the outputs directory
-            if [ -f "jfr_extracted_methods.txt" ]; then
-                mv jfr_extracted_methods.txt "$JFR_OUTPUT"
-                echo "JFR extraction complete: $JFR_OUTPUT"
-                echo "  $(grep -c '→' "$JFR_OUTPUT" 2>/dev/null || echo 0) methods extracted"
-            fi
-        else
-            echo "WARN: JFR extraction failed (non-fatal). JFR methods will fall through to NOT_FOUND."
-        fi
-    else
-        echo "WARN: libjvm.so not found in ${LIBS_BASE_DIR}. Skipping JFR extraction."
-    fi
-
-    echo "============================================================"
-    echo " STEP 2: Running mapper (mapped_updated.py)"
-    echo "============================================================"
-    # Ensure mapper points to image-scoped libs; allow overriding METHODS_FILE
-    METHODS_FILE_PATH="${METHODS_FILE:-/home/rupesh.punna/Prototype/native_methods.txt}"
-    echo "Using LIBS_DIR       = ${LIBS_BASE_DIR}"
-    echo "Using METHODS_FILE   = ${METHODS_FILE_PATH}"
-    echo "Using OUTPUTS_DIR    = ${OUTPUTS_BASE_DIR}"
-    LIBS_IMAGE="${LIBS_BASE_DIR}" LIBS_DIR="${LIBS_BASE_DIR}" METHODS_FILE="${METHODS_FILE_PATH}" OUTPUTS_DIR="${OUTPUTS_BASE_DIR}" \
-      python3 /home/rupesh.punna/Prototype/mapped_updated.py
-
-    echo "============================================================"
-    echo " STEP 3: Running filter.sh"
-    echo "============================================================"
-    IMG_SAFE="${IMG_SAFE}" OUTPUTS_DIR="${OUTPUTS_BASE_DIR}" \
-      bash /home/rupesh.punna/Prototype/filter.sh
-
-    echo "============================================================"
-    echo " STEP 4: Running change_format.py to change the format of the syscalls"
-    echo "============================================================"
-    IMG_SAFE="${IMG_SAFE}" OUTPUTS_DIR="${OUTPUTS_BASE_DIR}" \
-      python3 /home/rupesh.punna/Prototype/change_format.py "${OUTPUTS_BASE_DIR}/filtered_method_syscalls.txt" --sort --uniq
+    LIBS_IMAGE="${LIBS_BASE_DIR}" OUTPUTS_DIR="${OUTPUTS_BASE_DIR}" \
+      bash "${SCRIPT_DIR}/prepare_native_mapping.sh"
     echo "============================================================"
     echo " Analysis pipeline completed!"
     echo "============================================================"
@@ -114,17 +76,18 @@ echo "============================================================"
 echo " STEP 5: Running binary_analysis"
 echo "============================================================"
 
-LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-/home/rupesh.punna/Prototype/LIBS_${IMG_SAFE}}}"
-STARTFUNCS_DIR="${OUTPUTS_DIR:-/home/rupesh.punna/Prototype/outputs_${IMG_SAFE}}"
-SYSCALLS_OUT_DIR="${SYSCALLS_OUTPUT_DIR:-/home/rupesh.punna/Prototype/syscalls_output_${IMG_SAFE}}"
-BINARIES_BASE_DIR="${BINARIES_DIR:-/home/rupesh.punna/Prototype/BINARIES_${IMG_SAFE}}"
+LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-${PROJECT_ROOT}/LIBS_${IMG_SAFE}}}"
+STARTFUNCS_DIR="${OUTPUTS_DIR:-${PROJECT_ROOT}/outputs_${IMG_SAFE}}"
+SYSCALLS_OUT_DIR="${SYSCALLS_OUTPUT_DIR:-${PROJECT_ROOT}/syscalls_output_${IMG_SAFE}}"
+BINARIES_BASE_DIR="${BINARIES_DIR:-${PROJECT_ROOT}/BINARIES_${IMG_SAFE}}"
 
 # Determine which binaries to analyze based on mode
 if [ "$ANALYSIS_MODE" = "FULL_BYTECODE" ]; then
     # Standard flow: analyze libraries based on mapper.py output
     echo "Analyzing libraries with mapped native methods..."
-    bash /home/rupesh.punna/Prototype/automate_syscall_analysis.sh \
+    bash "${SCRIPT_DIR}/automate_syscall_analysis.sh" \
       --binary-dir "${LIBS_BASE_DIR}" \
+      --binaries-dir "${BINARIES_BASE_DIR}" \
       --startfunc-dir "${STARTFUNCS_DIR}" \
       --output-dir "${SYSCALLS_OUT_DIR}" \
       --img-safe "${IMG_SAFE}" \
@@ -178,8 +141,9 @@ elif [ "$ANALYSIS_MODE" = "LIBRARY_SYMBOLS" ]; then
         fi
     done
 
-    bash /home/rupesh.punna/Prototype/automate_syscall_analysis.sh \
+    bash "${SCRIPT_DIR}/automate_syscall_analysis.sh" \
       --binary-dir "${LIBS_BASE_DIR}" \
+      --binaries-dir "${BINARIES_BASE_DIR}" \
       --startfunc-dir "${STARTFUNCS_DIR}" \
       --output-dir "${SYSCALLS_OUT_DIR}" \
       --img-safe "${IMG_SAFE}" \
@@ -187,67 +151,17 @@ elif [ "$ANALYSIS_MODE" = "LIBRARY_SYMBOLS" ]; then
 
 elif [ "$ANALYSIS_MODE" = "BINARY_ONLY" ]; then
     # Analyze only executables using their entry points
-    echo "Analyzing binaries with entry points and exported symbols..."
+    echo "Analyzing executables only (skipping .so libraries)..."
 
-    # Create startfunc files for each binary
-    mkdir -p "$STARTFUNCS_DIR"
-
-    for bin in "$BINARIES_BASE_DIR"/*; do
-        [ -f "$bin" ] || continue
-        bin_name=$(basename "$bin")
-        startfunc_file="$STARTFUNCS_DIR/${bin_name}.txt"
-
-        echo "  Creating startfunc file for: $bin_name"
-
-        # Check if binary is stripped
-        if file "$bin" | grep -q "stripped"; then
-            echo "    Binary is stripped - using entry point address"
-
-            # Extract entry point address from ELF header
-            entry_point=$(readelf -h "$bin" 2>/dev/null | awk '/Entry point/ {print $4}')
-
-            if [ -n "$entry_point" ] && [ "$entry_point" != "0x0" ]; then
-                echo "$entry_point" > "$startfunc_file"
-                echo "    Using entry point address: $entry_point"
-            else
-                echo "    ERROR: Could not extract valid entry point from $bin_name"
-                # Fallback to trying dynamic symbols
-                nm -D --defined-only "$bin" 2>/dev/null | \
-                    awk '$2 == "T" {print $3}' | \
-                    grep -v '^_' | \
-                    sort -u > "$startfunc_file"
-                sym_count=$(wc -l < "$startfunc_file")
-                echo "    Fallback: extracted $sym_count dynamic symbols"
-            fi
-        else
-            # Binary is not stripped - try to use symbol names
-            echo "    Binary is not stripped - using symbols"
-
-            if nm "$bin" 2>/dev/null | grep -q " [Tt] _start$"; then
-                echo "_start" > "$startfunc_file"
-                echo "    Using _start as entry point"
-            elif nm "$bin" 2>/dev/null | grep -q " [Tt] main$"; then
-                echo "main" > "$startfunc_file"
-                echo "    Using main as entry point"
-            else
-                # Extract all exported symbols
-                nm -D --defined-only "$bin" 2>/dev/null | \
-                    awk '$2 == "T" {print $3}' | \
-                    grep -v '^_' | \
-                    sort -u > "$startfunc_file"
-
-                sym_count=$(wc -l < "$startfunc_file")
-                echo "    Extracted $sym_count exported symbols"
-            fi
-        fi
-    done
-
-    # Analyze binaries instead of libraries
-    bash /home/rupesh.punna/Prototype/automate_syscall_analysis.sh \
-      --binary-dir "${BINARIES_BASE_DIR}" \
-      --startfunc-dir "${STARTFUNCS_DIR}" \
+    # automate_syscall_analysis.sh handles binary start function generation
+    # internally via create_binary_start_file. We just pass --binaries-dir
+    # and --binaries-only to skip .so processing.
+    bash "${SCRIPT_DIR}/automate_syscall_analysis.sh" \
+      --binary-dir "${LIBS_BASE_DIR}" \
+      --binaries-dir "${BINARIES_BASE_DIR}" \
       --output-dir "${SYSCALLS_OUT_DIR}" \
       --img-safe "${IMG_SAFE}" \
+      --binaries-only \
       --log
 fi
 
@@ -255,5 +169,5 @@ echo "============================================================"
 echo " Binary analysis completed!"
 echo "============================================================"
 echo " STEP 6: Running combine_syscalls.sh"
-# bash /home/rupesh.punna/Prototype/combine_syscalls.sh "${SYSCALLS_OUT_DIR}"
+# bash "${SCRIPT_DIR}/combine_syscalls.sh "${SYSCALLS_OUT_DIR}"
 echo "============================================================"

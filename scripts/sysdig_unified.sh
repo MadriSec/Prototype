@@ -10,8 +10,11 @@
 #
 # All captured in one sysdig session for efficiency
 #
-# Usage: ./sysdig_unified.sh <container_id> [duration_seconds]
+# Usage: ./scripts/sysdig_unified.sh <container_id> [duration_seconds]
 #############################################################################
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 CONTAINER_ID="$1"
 DURATION="${2:-120}"
@@ -44,7 +47,7 @@ echo "Duration:       ${DURATION}s"
 echo ""
 
 # Create output directory for sysdig dynamic analysis
-SYSDIG_OUTPUT_DIR="sysdig_outputs_${IMG_SAFE}"
+SYSDIG_OUTPUT_DIR="${PROJECT_ROOT}/sysdig_outputs_${IMG_SAFE}"
 mkdir -p "$SYSDIG_OUTPUT_DIR"
 
 # Output files
@@ -299,10 +302,10 @@ else
     touch "$SYSDIG_OUTPUT_DIR/binaries_unique_${IMG_SAFE}.txt"
 fi
 
-# Extract JAR files (from open/openat/openat2 events)
+# Extract JAR files (open/openat/openat2/mmap — JVM often mmap()s JAR/ZIP files)
 echo "      Processing JAR files..."
 grep -a '\.jar' "$RAW_OUTPUT" | \
-  grep -a -E 'open|openat|openat2' | \
+  grep -a -E 'open|openat|openat2|mmap' | \
   sort -u > "$JARS_OUTPUT"
 JARS_COUNT=$(wc -l < "$JARS_OUTPUT")
 echo "        ✓ Found $JARS_COUNT JAR file accesses"
@@ -331,9 +334,9 @@ echo "╚═══════════════════════�
 echo ""
 
 # Create destination directories
-LIBS_DIR="LIBS_${IMG_SAFE}"
-BINS_DIR="BINARIES_${IMG_SAFE}"
-JARS_DIR="JARFILES_${IMG_SAFE}"
+LIBS_DIR="${PROJECT_ROOT}/LIBS_${IMG_SAFE}"
+BINS_DIR="${PROJECT_ROOT}/BINARIES_${IMG_SAFE}"
+JARS_DIR="${PROJECT_ROOT}/JARFILES_${IMG_SAFE}"
 
 mkdir -p "$LIBS_DIR" "$BINS_DIR" "$JARS_DIR"
 
@@ -554,5 +557,5 @@ echo "Executables:        $BINS_DIR/ ($BIN_SUCCESS files)"
 echo "JAR Files:          $JARS_DIR/ ($JAR_SUCCESS files)"
 echo ""
 echo "Next step:"
-echo "  Run: ./automate_syscall_analysis.sh --img-safe $IMG_SAFE --log"
+echo "  Run: ./scripts/automate_syscall_analysis.sh --img-safe $IMG_SAFE --log"
 echo ""

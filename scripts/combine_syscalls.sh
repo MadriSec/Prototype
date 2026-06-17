@@ -4,13 +4,16 @@
 # Usage:
 #   ./combine_syscalls.sh [base_dir] [output_file]
 # Defaults:
-#   base_dir   = /home/rupesh.punna/Prototype/syscalls_output (or syscalls_output_<image>)
+#   base_dir   = <repo>/syscalls_output (or syscalls_output_<image>)
 #   output_file= <base_dir>/unique_syscalls.txt
 
 set -euo pipefail
 
-# Prefer CLI arg; else env SYSCALLS_OUTPUT_DIR; else default path
-BASE_DIR=${1:-${SYSCALLS_OUTPUT_DIR:-/home/rupesh.punna/Prototype/syscalls_output}}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Prefer CLI arg; else env SYSCALLS_OUTPUT_DIR; else repo-local default path
+BASE_DIR=${1:-${SYSCALLS_OUTPUT_DIR:-${PROJECT_ROOT}/syscalls_output}}
 BASE_DIR=${BASE_DIR%/}
 OUT_FILE=${2:-"${BASE_DIR}/unique_syscalls.txt"}
 

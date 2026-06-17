@@ -93,7 +93,27 @@ def write_combined(groups, final_out, do_sort=False, do_uniq=False):
     with open(final_out, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + ("\n" if lines else ""))
 
+def lib_relative_path(name: str) -> str:
+    """Convert a library path to a relative path suitable for per-library output files.
+
+    Strips the leading LIBS_<IMG_SAFE>/ prefix so that the output filename preserves
+    the subdirectory structure (e.g. JDK8_LIBS/amd64/libnet.so).  This allows
+    automate_syscall_analysis.sh to locate the actual binary at
+    $BINARY_DIR/JDK8_LIBS/amd64/libnet.so.
+
+    Examples:
+        LIBS_tomcat_7.0/JDK8_LIBS/amd64/libnet.so  ->  JDK8_LIBS/amd64/libnet.so
+        LIBS_cassandra_3.0.29/libjvm.so             ->  libjvm.so
+        libc.so.6                                   ->  libc.so.6
+    """
+    # Strip leading LIBS_<anything>/ prefix (one path component)
+    m = re.match(r'^LIBS_[^/]+/(.+)$', name)
+    if m:
+        return m.group(1)
+    return name
+
 def safe_filename(name: str) -> str:
+    """Sanitise a single path component (no slashes expected)."""
     return re.sub(r'[^A-Za-z0-9._-]+', '_', name).strip('_')
 
 def write_per_library(groups, split_dir, do_sort=False, do_uniq=False):
@@ -102,8 +122,10 @@ def write_per_library(groups, split_dir, do_sort=False, do_uniq=False):
         methods = normalize_methods(methods, do_sort, do_uniq)
         if not methods:
             continue
-        fname = f"{safe_filename(lib)}.txt"
-        out_path = os.path.join(split_dir, fname)
+        rel = lib_relative_path(lib)
+        # Preserve subdirectory structure (e.g. JDK8_LIBS/amd64/)
+        out_path = os.path.join(split_dir, rel + ".txt")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("\n".join(methods) + "\n")
 

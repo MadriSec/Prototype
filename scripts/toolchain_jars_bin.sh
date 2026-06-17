@@ -1,5 +1,8 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 CONTAINER_ID=$1
 if [ -z "$CONTAINER_ID" ]; then
   echo "ERROR: Container ID not provided!"
@@ -108,7 +111,7 @@ cat binaries_abs.txt
 echo "------------------------------------------------------------"
 
 # --- STEP 7: Copy JAR/JMOD/module files ---
-DEST_DIR_JARS="/home/rupesh.punna/Prototype/JARFILES_${IMG_SAFE}"
+DEST_DIR_JARS="${PROJECT_ROOT}/JARFILES_${IMG_SAFE}"
 echo "Creating destination directory: $DEST_DIR_JARS"
 mkdir -p "$DEST_DIR_JARS"
 
@@ -122,7 +125,7 @@ for jar_path in $JAR_FILES; do
 done
 
 # --- STEP 8: Copy executed binaries ---
-DEST_DIR_BIN="/home/rupesh.punna/Prototype/BINARIES_${IMG_SAFE}"
+DEST_DIR_BIN="${PROJECT_ROOT}/BINARIES_${IMG_SAFE}"
 echo "Creating destination directory: $DEST_DIR_BIN"
 mkdir -p "$DEST_DIR_BIN"
 

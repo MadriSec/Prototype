@@ -1,0 +1,16 @@
+# Build output
+target/
+
+# Generated analysis artifacts
+BINARIES_*/
+JARFILES_*/
+LIBS_*/
+RUNTIME_*/
+outputs_*/
+sysdig_outputs_*/
+syscalls_output_*/
+syscalls_BIN_*/
+syscalls_LIBS_*/
+
+# Local symlink/output scratch
+outputs

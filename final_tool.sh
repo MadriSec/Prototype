@@ -21,7 +21,7 @@ if [ "${SKIP_BYTECODE_ANALYSIS:-0}" = "1" ]; then
     echo " STEP 2: Native mapping and start-function preparation"
     echo "============================================================"
     LIBS_IMAGE="${LIBS_BASE_DIR}" OUTPUTS_DIR="${OUTPUTS_BASE_DIR}" \
-      bash "${SCRIPT_DIR}/prepare_native_mapping.sh"
+      bash "${SCRIPT_DIR}/scripts/prepare_native_mapping.sh"
 
     echo "============================================================"
     echo " Analysis pipeline completed!"
@@ -69,12 +69,12 @@ else
     echo "============================================================"
     echo " STEP 1: Unified Sysdig Capture (Libraries, Binaries, JARs)"
     echo "============================================================"
-    bash "${SCRIPT_DIR}/sysdig_unified.sh" "$CONTAINER_ID" "120"
+    bash "${SCRIPT_DIR}/scripts/sysdig_unified.sh" "$CONTAINER_ID" "120"
 
     echo "============================================================"
     echo " STEP 1.5: Extracting runtime and JAR native libraries"
     echo "============================================================"
-    bash "${SCRIPT_DIR}/extract_runtime_and_jar_libs.sh" "$CONTAINER_ID"
+    bash "${SCRIPT_DIR}/scripts/extract_runtime_and_jar_libs.sh" "$CONTAINER_ID"
 fi
 
 echo "============================================================"
@@ -129,7 +129,7 @@ export ANALYSIS_MODE
 echo "============================================================"
 echo " STEP 3: Running Static Analysis (Mode: $ANALYSIS_MODE)"
 echo "============================================================"
-bash "${SCRIPT_DIR}/run_analysis.sh"
+bash "${SCRIPT_DIR}/scripts/run_analysis.sh"
 
 echo ""
 echo "============================================================"

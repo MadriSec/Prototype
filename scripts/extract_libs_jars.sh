@@ -30,7 +30,7 @@ set -euo pipefail
 # -----------------------------
 # Mode selection
 # -----------------------------
-MODE="${EXTRACT_MODE:-1}"
+MODE="${EXTRACT_MODE:-2}"
 if [[ "$MODE" != "1" && "$MODE" != "2" ]]; then
   echo "ERROR: EXTRACT_MODE must be 1 or 2 (got: $MODE)" >&2
   exit 1
@@ -210,11 +210,12 @@ for jar in "$SRC"/*.jar; do
   fi
 
   jar_name="$(basename "$jar")"
+  jar_name_lc="${jar_name,,}"
   jar_base_noext="$(basename "$jar" .jar)"
 
   # Some JARs encode architecture in the JAR filename itself
   jar_has_arch=false
-  if [[ "$jar_name" =~ ($ARCH_RE) ]]; then
+  if [[ "$jar_name_lc" =~ ($ARCH_RE) ]]; then
     jar_has_arch=true
   fi
 
@@ -224,16 +225,18 @@ for jar in "$SRC"/*.jar; do
 
     if [[ "$MODE" == "2" ]]; then
       base_name="$(basename "$entry")"
+      entry_lc="${entry,,}"
+      base_name_lc="${base_name,,}"
 
       # Require architecture match in path, basename, or JAR filename
-      if [[ ! "$entry" =~ ($ARCH_RE) ]] && \
-         [[ ! "$base_name" =~ ($ARCH_RE) ]] && \
+      if [[ ! "$entry_lc" =~ ($ARCH_RE) ]] && \
+         [[ ! "$base_name_lc" =~ ($ARCH_RE) ]] && \
          [[ "$jar_has_arch" != true ]]; then
         continue
       fi
 
       # Skip entries clearly meant for non-Linux OSes
-      [[ ! "$entry" =~ ($BAD_OS_RE) ]] || continue
+      [[ ! "$entry_lc" =~ ($BAD_OS_RE) ]] || continue
     fi
 
     base="$(basename "$entry")"

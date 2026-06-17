@@ -19,7 +19,7 @@ Usage: ./merge_all_syscalls.py <IMG_SAFE>
 Example:
   ./merge_all_syscalls.py jetty_9.4.58-jdk8-amazoncorretto
 
-Note: Place runc.txt in the same directory as this script to include default runtime syscalls.
+Note: Place runc.txt in the repository root to include default runtime syscalls.
 """
 
 import os
@@ -158,16 +158,17 @@ def main():
 
     img_safe = sys.argv[1]
     script_dir = Path(__file__).resolve().parent
+    project_root = script_dir.parent if script_dir.name == "scripts" else script_dir
 
     print("╔══════════════════════════════════════════════════════════════╗")
     print("║              Syscall Merge & Analysis Tool                   ║")
     print("╚══════════════════════════════════════════════════════════════╝")
     print(f"\nIMG_SAFE: {img_safe}")
-    print(f"Working directory: {script_dir}")
+    print(f"Working directory: {project_root}")
 
     # Define directories
-    bin_dir = script_dir / f"syscalls_BIN_{img_safe}"
-    libs_dir = script_dir / f"syscalls_output_{img_safe}"
+    bin_dir = project_root / f"syscalls_BIN_{img_safe}"
+    libs_dir = project_root / f"syscalls_output_{img_safe}"
 
     # =========================================================================
     # STEP 1: Process Binary Syscalls
@@ -230,7 +231,7 @@ def main():
     print("STEP 3: Loading runc.txt Default Whitelist")
     print("="*70)
 
-    runc_whitelist_path = script_dir / "runc.txt"
+    runc_whitelist_path = project_root / "runc.txt"
     runc_syscalls = set()
 
     if runc_whitelist_path.exists():

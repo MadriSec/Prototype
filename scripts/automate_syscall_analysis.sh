@@ -12,7 +12,7 @@
 #   3. Run .sh from SysPartCode/analysis/app for each binary
 #   4. Save results in organized output directories
 #
-# Usage: ./automate_syscall_analysis.sh [OPTIONS]
+# Usage: ./scripts/automate_syscall_analysis.sh [OPTIONS]
 #
 # Options:
 #   --startfunc-dir <dir>    Directory containing start function files (default: ./outputs)
@@ -31,11 +31,12 @@
 
 # Default directories (relative to script location)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STARTFUNC_DIR="$SCRIPT_DIR/outputs"
-BINARY_DIR="$SCRIPT_DIR/LIBS"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+STARTFUNC_DIR="$PROJECT_ROOT/outputs"
+BINARY_DIR="$PROJECT_ROOT/LIBS"
 BINARIES_DIR=""  # Will be auto-detected or set via --binaries-dir
-OUTPUT_BASE_DIR="$SCRIPT_DIR/syscalls_output"
-SYSPART_DIR="${SYSPART_DIR:-$SCRIPT_DIR/SysPartCode}"
+OUTPUT_BASE_DIR="$PROJECT_ROOT/syscalls_output"
+SYSPART_DIR="${SYSPART_DIR:-$PROJECT_ROOT/SysPartCode}"
 ENABLE_LOG=""
 IMG_SAFE=""  # Image safe name suffix (e.g., 33f67c1a1642)
 BINARIES_ONLY=""  # When set, skip library analysis and only process binaries
@@ -117,7 +118,7 @@ log_message() {
 #############################################################################
 auto_detect_img_safe() {
     # Try to detect from outputs_* directories
-    local outputs_dirs=("$SCRIPT_DIR"/outputs_*)
+    local outputs_dirs=("$PROJECT_ROOT"/outputs_*)
     if [ -d "${outputs_dirs[0]}" ]; then
         local dir_name=$(basename "${outputs_dirs[0]}")
         IMG_SAFE="${dir_name#outputs_}"
@@ -126,7 +127,7 @@ auto_detect_img_safe() {
     fi
 
     # Try to detect from BINARIES_* directories
-    local binaries_dirs=("$SCRIPT_DIR"/BINARIES_*)
+    local binaries_dirs=("$PROJECT_ROOT"/BINARIES_*)
     if [ -d "${binaries_dirs[0]}" ]; then
         local dir_name=$(basename "${binaries_dirs[0]}")
         IMG_SAFE="${dir_name#BINARIES_}"
@@ -154,20 +155,20 @@ check_prerequisites() {
 
     # Update directories based on IMG_SAFE
     if [ -n "$IMG_SAFE" ]; then
-        if [[ "$STARTFUNC_DIR" == "$SCRIPT_DIR/outputs" ]]; then
-            STARTFUNC_DIR="$SCRIPT_DIR/outputs_$IMG_SAFE"
+        if [[ "$STARTFUNC_DIR" == "$PROJECT_ROOT/outputs" ]]; then
+            STARTFUNC_DIR="$PROJECT_ROOT/outputs_$IMG_SAFE"
             log_message "INFO" "Using IMG_SAFE-based startfunc dir: $STARTFUNC_DIR"
         fi
-        if [[ "$BINARY_DIR" == "$SCRIPT_DIR/LIBS" ]]; then
-            BINARY_DIR="$SCRIPT_DIR/LIBS_$IMG_SAFE"
+        if [[ "$BINARY_DIR" == "$PROJECT_ROOT/LIBS" ]]; then
+            BINARY_DIR="$PROJECT_ROOT/LIBS_$IMG_SAFE"
             log_message "INFO" "Using IMG_SAFE-based library dir: $BINARY_DIR"
         fi
         if [ -z "$BINARIES_DIR" ]; then
-            BINARIES_DIR="$SCRIPT_DIR/BINARIES_$IMG_SAFE"
+            BINARIES_DIR="$PROJECT_ROOT/BINARIES_$IMG_SAFE"
             log_message "INFO" "Using IMG_SAFE-based binaries dir: $BINARIES_DIR"
         fi
-        if [[ "$OUTPUT_BASE_DIR" == "$SCRIPT_DIR/syscalls_output" ]]; then
-            OUTPUT_BASE_DIR="$SCRIPT_DIR/syscalls_LIBS_$IMG_SAFE"
+        if [[ "$OUTPUT_BASE_DIR" == "$PROJECT_ROOT/syscalls_output" ]]; then
+            OUTPUT_BASE_DIR="$PROJECT_ROOT/syscalls_output_$IMG_SAFE"
             log_message "INFO" "Using IMG_SAFE-based output dir for libraries: $OUTPUT_BASE_DIR"
         fi
     fi
@@ -650,9 +651,9 @@ main() {
         log_message "INFO" "Binaries directory: $BINARIES_DIR"
 
         # Create separate output directory for binaries
-        local BINARY_OUTPUT_DIR="$SCRIPT_DIR/syscalls_BIN_$IMG_SAFE"
+        local BINARY_OUTPUT_DIR="$PROJECT_ROOT/syscalls_BIN_$IMG_SAFE"
         if [ -z "$IMG_SAFE" ]; then
-            BINARY_OUTPUT_DIR="$SCRIPT_DIR/syscalls_binaries"
+            BINARY_OUTPUT_DIR="$PROJECT_ROOT/syscalls_binaries"
         fi
 
         mkdir -p "$BINARY_OUTPUT_DIR"
@@ -711,9 +712,9 @@ main() {
     fi
     log_message "INFO" "Libraries results saved to: $OUTPUT_BASE_DIR"
     if [ -n "$BINARIES_DIR" ] && [ -d "$BINARIES_DIR" ]; then
-        local BINARY_OUTPUT_DIR="$SCRIPT_DIR/syscalls_BIN_$IMG_SAFE"
+        local BINARY_OUTPUT_DIR="$PROJECT_ROOT/syscalls_BIN_$IMG_SAFE"
         if [ -z "$IMG_SAFE" ]; then
-            BINARY_OUTPUT_DIR="$SCRIPT_DIR/syscalls_binaries"
+            BINARY_OUTPUT_DIR="$PROJECT_ROOT/syscalls_binaries"
         fi
         log_message "INFO" "Binaries results saved to: $BINARY_OUTPUT_DIR"
     fi
@@ -740,7 +741,7 @@ main() {
             echo ""
             if [ $merge_exit -eq 0 ]; then
                 log_message "SUCCESS" "Syscall merge and seccomp profile generation completed"
-                log_message "INFO" "Seccomp profile: $SCRIPT_DIR/syscalls_LIBS_$IMG_SAFE/${IMG_SAFE}.json"
+                log_message "INFO" "Seccomp profile: $PROJECT_ROOT/syscalls_output_$IMG_SAFE/${IMG_SAFE}.json"
             else
                 log_message "ERROR" "Syscall merge failed (exit code: $merge_exit)"
                 log_message "WARNING" "Analysis results are still available in output directories"

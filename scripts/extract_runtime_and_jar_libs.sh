@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 if [ $# -lt 1 ]; then
   echo "Usage: $0 <container_id_or_name>" >&2
@@ -16,9 +17,9 @@ if [ -z "${IMG_SAFE:-}" ]; then
   exit 1
 fi
 
-JARFILES_DIR="${JARFILES_DIR:-${SCRIPT_DIR}/JARFILES_${IMG_SAFE}}"
-LIBS_DIR="${LIBS_DIR:-${SCRIPT_DIR}/LIBS_${IMG_SAFE}}"
-RUNTIME_DIR="${RUNTIME_DIR:-${SCRIPT_DIR}/RUNTIME_${IMG_SAFE}}"
+JARFILES_DIR="${JARFILES_DIR:-${PROJECT_ROOT}/JARFILES_${IMG_SAFE}}"
+LIBS_DIR="${LIBS_DIR:-${PROJECT_ROOT}/LIBS_${IMG_SAFE}}"
+RUNTIME_DIR="${RUNTIME_DIR:-${PROJECT_ROOT}/RUNTIME_${IMG_SAFE}}"
 
 mkdir -p "$JARFILES_DIR" "$LIBS_DIR" "$RUNTIME_DIR"
 
@@ -29,7 +30,7 @@ echo "Container:           $CONTAINER_ID"
 echo "Runtime destination: $RUNTIME_DIR"
 echo "LIB destination:     $LIBS_DIR"
 
-python3 "${SCRIPT_DIR}/scripts/extract_container_jdk.py" \
+python3 "${SCRIPT_DIR}/extract_container_jdk.py" \
   "$CONTAINER_ID" \
   --libs \
   --force \
