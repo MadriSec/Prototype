@@ -1,5 +1,7 @@
 # EchoTrace
 
+[![CI](https://github.com/MadriSec/EchoTrace/actions/workflows/ci.yml/badge.svg)](https://github.com/MadriSec/EchoTrace/actions/workflows/ci.yml)
+
 **Static and dynamic analysis framework for generating container-specific seccomp allowlists for Java applications.**
 
 EchoTrace analyzes how a Java container reaches native code and, from there, Linux system calls. It combines runtime observation of the container with static analysis of Java bytecode and native ELF binaries. The output is a JSON syscall allowlist that can be used as the basis for a Docker seccomp profile.
