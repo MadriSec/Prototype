@@ -1,0 +1,630 @@
+package com.echotrace.app.bytecode_new;
+
+import sootup.core.inputlocation.AnalysisInputLocation;
+import sootup.java.bytecode.frontend.inputlocation.JavaClassPathAnalysisInputLocation;
+import sootup.java.bytecode.frontend.inputlocation.DefaultRuntimeAnalysisInputLocation;
+import sootup.core.signatures.MethodSignature;
+import sootup.java.core.views.JavaView;
+import sootup.java.core.JavaSootClass;
+import sootup.java.core.JavaSootMethod;
+import sootup.core.jimple.common.stmt.InvokableStmt;
+import sootup.core.model.Body;
+import sootup.core.model.MethodModifier;
+import java.io.*;
+import java.util.*;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import java.util.stream.Collectors;
+import java.util.Comparator;
+
+/**
+ * Native method tracer with path from main methods to native methods.
+ * Finds all call chains from 'main' methods to any native methods,
+ * following method calls (recursively) through user and dependency code.
+ * Now handles inherited methods properly.
+ */
+
+
+public class PrintpathDFS {
+    private static final Set<MethodSignature> allTargetDepNativeMethods = new HashSet<>();
+// JRE natives that are actually used (reachable via DFS from main)
+private static final Set<MethodSignature> jreUsedNativeMethods = new HashSet<>();
+    // Visited methods in current traversal (avoids infinite loops)
+    private static final Set<MethodSignature> visited = new HashSet<>();
+    // All call paths from main to native methods found during traversal
+    private static final List<List<MethodSignature>> nativePaths = new ArrayList<>();
+    // All native methods found during traversal (per-main run)
+    private static final Set<MethodSignature> foundNative = new HashSet<>();
+    // SootUp analysis view (the code inspection engine)
+    private static JavaView view;
+    // Class names discovered in your target (main) JARs
+    private static Set<String> targetJarClasses = new HashSet<>();
+    // Class names discovered in dependency JARs
+    private static Set<String> dependencyClasses = new HashSet<>();
+    // Unique native methods aggregate:
+    // - in --1 mode: natives reached from main()
+    // - in --2 mode: all natives in app (target+deps) from scanAllNativeMethods()
+    private static final Set<MethodSignature> allUniqueNativeMethods = new HashSet<>();
+
+    public static void main(String[] args) {
+        // Usage check: need target and dependency directories as args
+        if (args.length < 2) {
+            System.err.println("Usage: java PrintpathDFS <target-directory> <dependencies-directory> [--1|--2]");
+            System.err.println("  --1: Only include native methods called by main methods (with paths)");
+            System.err.println("  --2: Include all native methods present in target JARs");
+            return;
+        }
+
+        String targetDir = args[0];
+        String depsDir = args[1];
+
+        // Parse mode argument
+        boolean onlyMainCalled = false;
+        boolean includeAllNative = false;
+
+        if (args.length >= 3) {
+            if ("--1".equals(args[2])) {
+                onlyMainCalled = true;
+                System.out.println("Mode: Only native methods called by main methods");
+            } else if ("--2".equals(args[2])) {
+                includeAllNative = true;
+                System.out.println("Mode: All native methods in target JARs");
+            } else {
+                System.err.println("Invalid mode. Use --1 or --2");
+                return;
+            }
+        } else {
+            // Default mode: only main-called methods
+            onlyMainCalled = true;
+            System.out.println("Mode: Only native methods called by main methods (default)");
+        }
+
+        System.out.println("=== Native Method Tracer with Paths ===");
+        System.out.println("Analyzing target directory: " + targetDir);
+        System.out.println("Dependencies directory: " + depsDir);
+
+        // 1) Load JARs from target and dependencies
+        List<String> targetJars = loadJarsFromDirectory(targetDir, targetJarClasses, "target");
+        List<String> depJars = loadJarsFromDirectory(depsDir, dependencyClasses, "dependency");
+
+        List<AnalysisInputLocation> inputs = new ArrayList<>();
+        for (String jar : targetJars) inputs.add(new JavaClassPathAnalysisInputLocation(jar));
+        for (String depJar : depJars) inputs.add(new JavaClassPathAnalysisInputLocation(depJar));
+        inputs.add(new DefaultRuntimeAnalysisInputLocation());
+        view = new JavaView(inputs);
+
+        System.out.println("Target JARs contain " + targetJarClasses.size() + " classes");
+        System.out.println("Dependencies contain " + dependencyClasses.size() + " classes");
+
+
+
+
+        // 3) Find main methods in target JARs
+        List<JavaSootMethod> mainMethods = new ArrayList<>();
+        for (JavaSootClass clazz : view.getClasses().collect(Collectors.toList())) {
+            String className = clazz.getType().getFullyQualifiedName();
+            if (targetJarClasses.contains(className)) {
+                for (JavaSootMethod method : clazz.getMethods()) {
+                    if (isMainMethod(method)) {
+                        mainMethods.add(method);
+                        System.out.println("Found main method: " + method.getSignature());
+                    }
+                }
+            }
+        }
+
+        if (onlyMainCalled && mainMethods.isEmpty()) {
+            System.out.println("No main methods found in the target JARs.");
+            // In --1 mode, we don’t scan; just write empty/whatever was discovered during DFS (none).
+            writeUniqueNativeMethodsToFile("unique_native_methods.txt", allUniqueNativeMethods);
+            // Also emit the per-main paths file with the “no native methods” notes.
+            writeMainCalledNativeMethods("native_methods_with_paths.txt", mainMethods);
+            return;
+        }
+
+        // 4) In --1 mode, DFS from each main to collect reachable natives (and paths)
+        if (onlyMainCalled) {
+            for (JavaSootMethod main : mainMethods) {
+                visited.clear();
+                nativePaths.clear();
+                foundNative.clear();
+
+                List<MethodSignature> startPath = new ArrayList<>();
+                startPath.add(main.getSignature());
+                dfs(main.getSignature(), startPath);
+
+                // Aggregate ONLY in --1 mode
+                allUniqueNativeMethods.addAll(foundNative);
+            }
+        }
+
+        // 5) Write results based on mode
+        if (onlyMainCalled) {
+            // Mode 1: Only write native methods called by main methods
+            writeMainCalledNativeMethods("native_methods_with_paths.txt", mainMethods);
+            writeUniqueNativeMethodsToFile("unique_native_methods.txt", allUniqueNativeMethods);
+        } else if (includeAllNative) {
+            // Mode 2: Write all native methods found in target JARs (scan already ran)
+            writeAllNativeMethodsInTarget("all_native_methods_in_target.txt", targetJarClasses);
+            writeNativeMethodsByPackage("native_methods_by_package.txt", allUniqueNativeMethods);
+        }
+        if (includeAllNative) {
+    System.out.println("\n=== Scanning All Classes for Native Methods ===");
+    scanAllNativeMethods(); // keeps your counters/diagnostics
+    System.out.println("Total native methods found in entire codebase: " + allUniqueNativeMethods.size());
+
+    // A) Scan only target+deps for all their native methods (no JRE)
+    scanTargetAndDependencyNatives();
+
+    // B) Also run DFS from main() to discover reachable natives, then keep ONLY JRE natives
+    Set<MethodSignature> reachableNatives = new HashSet<>();
+    if (!mainMethods.isEmpty()) {
+        for (JavaSootMethod main : mainMethods) {
+            visited.clear();
+            nativePaths.clear();
+            foundNative.clear();
+
+            List<MethodSignature> startPath = new ArrayList<>();
+            startPath.add(main.getSignature());
+            dfs(main.getSignature(), startPath);
+
+            reachableNatives.addAll(foundNative);
+        }
+    } else {
+        System.out.println("[WARN] No main methods found; cannot determine JRE natives used.");
+    }
+
+    // Filter reachable → only JRE (not in target or deps)
+    for (MethodSignature sig : reachableNatives) {
+        String className = sig.getDeclClassType().getFullyQualifiedName();
+        if (!targetJarClasses.contains(className) && !dependencyClasses.contains(className)) {
+            jreUsedNativeMethods.add(sig);
+        }
+    }
+
+    // C) Write outputs for --2
+    writeAllTargetDepFlat("all_target_dep_natives.txt", allTargetDepNativeMethods);
+    writeJreUsedSignatures("jre_used_natives.txt", jreUsedNativeMethods);
+    writeAllTargetDepSignatures("all_target_dep_natives_signatures.txt", allTargetDepNativeMethods);
+
+    // (Optional) still useful to group everything you scanned by package:
+    // writeNativeMethodsByPackage("native_methods_by_package.txt", allUniqueNativeMethods);
+
+    return; // we're done for --2
+}
+    }
+private static void writeJreUsedSignatures(String filename, Set<MethodSignature> methods) {
+    try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
+        List<String> lines = methods.stream()
+                .sorted(Comparator.comparing(MethodSignature::toString))
+                .map(MethodSignature::toString) // already like "<java.lang.Class: ...>"
+                .collect(Collectors.toList());
+
+        writer.println("JRE native methods actually used by the application:");
+        for (int i = 0; i < lines.size(); i++) {
+            writer.println((i + 1) + ". " + lines.get(i));
+        }
+
+        System.out.println("\nJRE-used native methods written to: " + filename);
+        System.out.println("Total: " + lines.size());
+    } catch (IOException e) {
+        System.err.println("Error writing " + filename + ": " + e.getMessage());
+    }
+}
+
+    /**
+     * MODIFIED: Only runs when explicitly called (i.e., in --2 mode).
+     * Scans ALL classes (targets + deps + JRE) for native methods.
+     * Populates allUniqueNativeMethods.
+     */
+    private static void scanAllNativeMethods() {
+        int targetClassCount = 0;
+        int dependencyClassCount = 0;
+        int jreClassCount = 0;
+        int targetNativeMethodCount = 0;
+        int dependencyNativeMethodCount = 0;
+        int jreNativeMethodCount = 0;
+
+        for (JavaSootClass clazz : view.getClasses().collect(Collectors.toList())) {
+            String className = clazz.getType().getFullyQualifiedName();
+
+            // Categorize all classes (including JRE)
+            if (targetJarClasses.contains(className)) {
+                targetClassCount++;
+                for (JavaSootMethod method : clazz.getMethods()) {
+                    if (method.getModifiers().contains(MethodModifier.NATIVE)) {
+                        allUniqueNativeMethods.add(method.getSignature());
+                        targetNativeMethodCount++;
+                        System.out.println("Found TARGET native method: " + method.getSignature());
+                    }
+                }
+            } else if (dependencyClasses.contains(className)) {
+                dependencyClassCount++;
+                for (JavaSootMethod method : clazz.getMethods()) {
+                    if (method.getModifiers().contains(MethodModifier.NATIVE)) {
+                        allUniqueNativeMethods.add(method.getSignature());
+                        dependencyNativeMethodCount++;
+                        if (className.contains("tomcat") || className.contains("jni")) {
+                            System.out.println("Found Tomcat/JNI native method: " + method.getSignature());
+                        }
+                    }
+                }
+            } else {
+                // This is a JRE class
+                jreClassCount++;
+                for (JavaSootMethod method : clazz.getMethods()) {
+                    if (method.getModifiers().contains(MethodModifier.NATIVE)) {
+                        allUniqueNativeMethods.add(method.getSignature());
+                        jreNativeMethodCount++;
+                        // Only show some key JRE native methods to avoid spam
+                        if (className.startsWith("sun.misc.Unsafe") || 
+                            className.startsWith("java.lang.Thread") ||
+                            className.startsWith("java.lang.Class") ||
+                            className.startsWith("java.util.zip.ZipFile") ||
+                            className.startsWith("java.lang.ClassLoader")) {
+                            System.out.println("Found JRE native method: " + method.getSignature());
+                        }
+                    }
+                }
+            }
+        }
+
+        System.out.println("Scanned " + (targetClassCount + dependencyClassCount + jreClassCount) + " total classes:");
+        System.out.println("  - Target classes: " + targetClassCount);
+        System.out.println("  - Dependency classes: " + dependencyClassCount);
+        System.out.println("  - JRE classes: " + jreClassCount);
+        System.out.println("Found " + allUniqueNativeMethods.size() + " total native methods:");
+        System.out.println("  - Target JARs: " + targetNativeMethodCount);
+        System.out.println("  - Dependencies: " + dependencyNativeMethodCount);
+        System.out.println("  - JRE: " + jreNativeMethodCount);
+        
+        // Debug: Show breakdown of Tomcat classes
+        System.out.println("\nDEBUG: Tomcat class breakdown:");
+        long tomcatInTarget = targetJarClasses.stream().filter(cls -> cls.contains("org.apache.tomcat")).count();
+        long tomcatInDeps = dependencyClasses.stream().filter(cls -> cls.contains("org.apache.tomcat")).count();
+        System.out.println("  - Tomcat classes in target: " + tomcatInTarget);
+        System.out.println("  - Tomcat classes in deps: " + tomcatInDeps);
+    }
+// Scan ONLY target + dependencies for native methods (exclude JRE)
+private static void scanTargetAndDependencyNatives() {
+    for (JavaSootClass clazz : view.getClasses().collect(Collectors.toList())) {
+        String className = clazz.getType().getFullyQualifiedName();
+        if (targetJarClasses.contains(className) || dependencyClasses.contains(className)) {
+            for (JavaSootMethod m : clazz.getMethods()) {
+                if (m.getModifiers().contains(MethodModifier.NATIVE)) {
+                    allTargetDepNativeMethods.add(m.getSignature());
+                }
+            }
+        }
+    }
+}
+private static void writeAllTargetDepSignatures(String filename, Set<MethodSignature> methods) {
+    try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
+        List<MethodSignature> sorted = methods.stream()
+                .sorted(Comparator.comparing(MethodSignature::toString))
+                .collect(Collectors.toList());
+
+        writer.println("All native methods (target + dependencies) — full signatures:");
+        for (int i = 0; i < sorted.size(); i++) {
+            writer.println((i + 1) + ". " + sorted.get(i));
+        }
+
+        System.out.println("\nTarget+Deps native **signatures** written to: " + filename);
+        System.out.println("Total signatures (no overload collapse): " + sorted.size());
+    } catch (IOException e) {
+        System.err.println("Error writing " + filename + ": " + e.getMessage());
+    }
+}
+
+private static void writeAllTargetDepFlat(String filename, Set<MethodSignature> methods) {
+    try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
+        Map<String, Long> byName = methods.stream()
+            .collect(Collectors.groupingBy(
+                sig -> sig.getDeclClassType().getFullyQualifiedName() + "." + sig.getName(),
+                Collectors.counting()
+            ));
+
+        List<String> lines = byName.entrySet().stream()
+            .map(e -> e.getKey() + (e.getValue() > 1 ? "  (+" + (e.getValue()-1) + " overloads)" : ""))
+            .sorted()
+            .collect(Collectors.toList());
+
+        for (String line : lines) writer.println(line);
+
+        System.out.println("\nTarget+Deps native methods (flat) written to: " + filename);
+        System.out.println("Unique names (overloads collapsed): " + lines.size());
+    } catch (IOException e) {
+        System.err.println("Error writing " + filename + ": " + e.getMessage());
+    }
+}
+
+    /**
+     * Loads all JAR files in a directory and collects all class names inside them.
+     */
+    private static List<String> loadJarsFromDirectory(String dirPath, Set<String> classSet, String type) {
+        List<String> jarList = new ArrayList<>();
+        File root = new File(dirPath);
+        if (!root.exists() || !root.isDirectory()) {
+            System.err.println(type + " directory does not exist or is not a directory: " + dirPath);
+            return jarList;
+        }
+        Deque<File> stack = new ArrayDeque<>();
+        stack.push(root);
+        while (!stack.isEmpty()) {
+            File dir = stack.pop();
+            File[] files = dir.listFiles();
+            if (files == null) continue;
+            for (File f : files) {
+                if (f.isDirectory()) {
+                    stack.push(f);
+                } else if (f.getName().endsWith(".jar")) {
+                    System.out.println("Processing " + type + " JAR: " + f.getAbsolutePath());
+                    jarList.add(f.getAbsolutePath());
+                    try (ZipFile zipFile = new ZipFile(f)) {
+                        Enumeration<? extends ZipEntry> entries = zipFile.entries();
+                        while (entries.hasMoreElements()) {
+                            ZipEntry entry = entries.nextElement();
+                            String name = entry.getName();
+                            if (name.endsWith(".class")) {
+                                String className = name.replace('/', '.').substring(0, name.length() - 6);
+                                classSet.add(className);
+                            }
+                        }
+                    } catch (IOException e) {
+                        System.err.println("Error reading " + type + " JAR: " + f.getName() + " - " + e.getMessage());
+                    }
+                }
+            }
+        }
+        System.out.println("Total " + type + " JARs found: " + jarList.size());
+        System.out.println(type + " classes indexed: " + classSet.size());
+        return jarList;
+    }
+
+
+    /**
+     * Checks if a method is a real Java main(String[] args) entry point
+     */
+    private static boolean isMainMethod(JavaSootMethod m) {
+        return m.getName().equals("main")
+                && m.getModifiers().contains(MethodModifier.PUBLIC)
+                && m.getModifiers().contains(MethodModifier.STATIC)
+                && m.getParameterTypes().size() == 1
+                && m.getParameterTypes().get(0).toString().equals("java.lang.String[]")
+                && m.getReturnType().toString().equals("void");
+    }
+
+    /**
+     * Recursively (DFS) finds all call paths from a starting method to native methods.
+     * Now handles inherited methods by checking parent classes when a method is not found.
+     */
+    private static void dfs(MethodSignature sig, List<MethodSignature> currentPath) {
+        if (visited.contains(sig)) return;
+        visited.add(sig);
+
+        System.out.println("  [DEBUG] Analyzing: " + sig);
+
+        Optional<JavaSootMethod> opt = view.getMethod(sig);
+
+        if (!opt.isPresent()) {
+            opt = findInheritedMethod(sig);
+        }
+
+        if (!opt.isPresent()) {
+            System.out.println("  [WARN] Method not found: " + sig);
+            return;
+        }
+
+        JavaSootMethod m = opt.get();
+
+        // If method is native, record the path and stop further traversal
+        if (m.getModifiers().contains(MethodModifier.NATIVE)) {
+            foundNative.add(sig);
+            nativePaths.add(new ArrayList<>(currentPath));
+            System.out.println("  [NATIVE] Found: " + sig);
+            System.out.println("  [NATIVE] Path: " + buildPathString(currentPath));
+            return;
+        }
+
+        try {
+            if (!m.hasBody()) {
+                System.out.println("  [DEBUG] No body: " + sig);
+                return;
+            }
+
+            Body body = m.getBody();
+            if (body == null) {
+                System.out.println("  [DEBUG] Body is null: " + sig);
+                return;
+            }
+
+            for (Object stmtObj : body.getStmts()) {
+                if (stmtObj instanceof InvokableStmt) {
+                    ((InvokableStmt) stmtObj).getInvokeExpr().ifPresent(invokeExpr -> {
+                        MethodSignature callee = invokeExpr.getMethodSignature();
+                        System.out.println("  [DEBUG] Found call: " + callee);
+                        List<MethodSignature> newPath = new ArrayList<>(currentPath);
+                        newPath.add(callee);
+                        dfs(callee, newPath);
+                    });
+                }
+            }
+        } catch (Throwable t) {
+            System.err.println("  [WARN] Could not analyze " + sig + ": " + t.getMessage());
+        }
+    }
+
+    /**
+     * Tries to find a method in parent classes when it's not found in the original class.
+     */
+    private static Optional<JavaSootMethod> findInheritedMethod(MethodSignature sig) {
+        String className = sig.getDeclClassType().getFullyQualifiedName();
+        String methodName = sig.getName();
+
+        System.out.println("  [DEBUG] Looking for inherited method: " + methodName + " from class: " + className);
+        return findInheritedMethodRecursive(className, methodName);
+    }
+
+    private static Optional<JavaSootMethod> findInheritedMethodRecursive(String className, String methodName) {
+        for (JavaSootClass clazz : view.getClasses().collect(Collectors.toList())) {
+            if (clazz.getType().getFullyQualifiedName().equals(className)) {
+                System.out.println("  [DEBUG] Searching in class: " + className);
+
+                for (JavaSootMethod method : clazz.getMethods()) {
+                    if (method.getName().equals(methodName)) {
+                        System.out.println("  [DEBUG] Found method: " + method.getSignature());
+                        return Optional.of(method);
+                    }
+                }
+
+                if (clazz.hasSuperclass()) {
+                    String superClassName = clazz.getSuperclass().get().getFullyQualifiedName();
+                    System.out.println("  [DEBUG] Method not found in " + className + ", checking superclass: " + superClassName);
+                    return findInheritedMethodRecursive(superClassName, methodName);
+                } else {
+                    System.out.println("  [DEBUG] Class " + className + " has no superclass, method not found");
+                }
+                break;
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static String buildPathString(List<MethodSignature> path) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < path.size(); i++) {
+            if (i > 0) sb.append(" -> ");
+            sb.append(path.get(i));
+        }
+        return sb.toString();
+    }
+
+    private static void writeUniqueNativeMethodsToFile(String filename, Set<MethodSignature> nativeMethods) {
+        try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
+            writer.println("Unique native methods found:");
+            int count = 1;
+            for (MethodSignature sig : nativeMethods) {
+                writer.println(count + ". " + sig);
+                count++;
+            }
+            System.out.println("[INFO] Unique native methods written to " + filename);
+        } catch (IOException e) {
+            System.err.println("[ERROR] Failed to write unique native methods: " + e.getMessage());
+        }
+    }
+
+    private static void writeNativeMethodsByPackage(String filename, Set<MethodSignature> nativeMethods) {
+        try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
+            writer.println("Native methods organized by package:");
+            writer.println("Total native methods found: " + nativeMethods.size());
+            writer.println();
+
+            Map<String, List<MethodSignature>> methodsByPackage = new TreeMap<>();
+            for (MethodSignature sig : nativeMethods) {
+                String className = sig.getDeclClassType().getFullyQualifiedName();
+                String packageName = className.contains(".")
+                        ? className.substring(0, className.lastIndexOf('.'))
+                        : "(default package)";
+                methodsByPackage.computeIfAbsent(packageName, k -> new ArrayList<>()).add(sig);
+            }
+
+            for (Map.Entry<String, List<MethodSignature>> entry : methodsByPackage.entrySet()) {
+                String packageName = entry.getKey();
+                List<MethodSignature> methods = entry.getValue();
+
+                writer.println("=== Package: " + packageName + " ===");
+                writer.println("Methods: " + methods.size());
+                for (int i = 0; i < methods.size(); i++) {
+                    writer.println((i + 1) + ". " + methods.get(i));
+                }
+                writer.println();
+            }
+
+            System.out.println("[INFO] Native methods by package written to " + filename);
+        } catch (IOException e) {
+            System.err.println("[ERROR] Failed to write native methods by package: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Writes only native methods that are called by main methods (with paths).
+     * (Re-runs DFS per main to ensure fresh paths in the file.)
+     */
+    private static void writeMainCalledNativeMethods(String filename, List<JavaSootMethod> mainMethods) {
+        try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
+            writer.println("Native methods called by main methods (with call paths):\n");
+
+            if (mainMethods.isEmpty()) {
+                writer.println("(No main methods found in target JARs.)");
+                System.out.println("\nResults written to: " + filename);
+                return;
+            }
+
+            for (int i = 0; i < mainMethods.size(); i++) {
+                JavaSootMethod main = mainMethods.get(i);
+                writer.println("=== Main Method " + (i + 1) + ": " + main.getSignature() + " ===");
+
+                visited.clear();
+                nativePaths.clear();
+                foundNative.clear();
+
+                List<MethodSignature> startPath = new ArrayList<>();
+                startPath.add(main.getSignature());
+                dfs(main.getSignature(), startPath);
+
+                if (foundNative.isEmpty()) {
+                    writer.println("No native methods found for this main method.");
+                } else {
+                    writer.println("Found " + nativePaths.size() + " paths to " + foundNative.size() + " native methods:");
+                    for (int j = 0; j < nativePaths.size(); j++) {
+                        writer.println("Path " + (j + 1) + ": " + buildPathString(nativePaths.get(j)));
+                    }
+                }
+                writer.println();
+            }
+            System.out.println("\nResults written to: " + filename);
+        } catch (IOException e) {
+            System.err.println("Error writing results: " + e.getMessage());
+        }
+    }
+
+    /**
+     * MODIFIED: Writes all native methods found in target + dependencies + JRE
+     */
+// Writes all native methods found in TARGET + DEPENDENCIES only (excludes JRE)
+private static void writeAllNativeMethodsInTarget(String filename, Set<String> targetJarClasses) {
+    try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
+        // Collect natives only from app classes (target + deps)
+        Set<String> nativesFlat = new HashSet<>();
+        Set<String> appClasses = new HashSet<>(targetJarClasses);
+        appClasses.addAll(dependencyClasses);
+
+        for (JavaSootClass clazz : view.getClasses().collect(Collectors.toList())) {
+            String className = clazz.getType().getFullyQualifiedName();
+            if (!appClasses.contains(className)) continue; // skip JRE
+
+            for (JavaSootMethod m : clazz.getMethods()) {
+                if (m.getModifiers().contains(MethodModifier.NATIVE)) {
+                    // Flat "Class.method" format (no params/return types)
+                    nativesFlat.add(className + "." + m.getName());
+                }
+            }
+        }
+
+        // Deterministic order
+        List<String> sorted = new ArrayList<>(nativesFlat);
+        Collections.sort(sorted);
+
+        for (String line : sorted) {
+            writer.println(line);
+        }
+
+        System.out.println("\nAll (target+deps) native methods written to: " + filename);
+        System.out.println("Total native methods found: " + sorted.size());
+    } catch (IOException e) {
+        System.err.println("Error writing all native methods: " + e.getMessage());
+    }
+}
+
+
+}
