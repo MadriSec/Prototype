@@ -2,6 +2,8 @@
 
 This directory contains EchoTrace's bytecode analysis detectors. Each detector targets a different mechanism by which Java code invokes native (C/C++) functions.
 
+For a **deep dive on JNI static detection**, **`PrototypeFinal`**, **application vs JDK natives**, and **cross-JDK JUnit results**, see **[JNI_INTERFACE_DETECTION.md](./JNI_INTERFACE_DETECTION.md)**.
+
 ## Overview
 
 Java applications reach native code through several interfaces. Each has a distinct bytecode signature that requires a specialized detection strategy:
@@ -18,7 +20,7 @@ Java applications reach native code through several interfaces. Each has a disti
 
 ---
 
-## 1. JNI Static Binding [Deep Dive](https://github.com/MadriSec/Prototype/blob/main/src/main/java/com/echotrace/app/bytecode_new/JNI_INTERFACE_DETECTION.md)
+## 1. JNI Static Binding
 
 **File:** `PrototypeFinal.java`, `Mode4NativeScanner.java`
 
@@ -46,7 +48,7 @@ java.lang.System.nanoTime  →  Java_java_lang_System_nanoTime (in libjava.so)
 
 ---
 
-## 2. JNI Dynamic Binding 
+## 2. JNI Dynamic Binding (RegisterNatives)
 
 **File:** `JNIDyn.java`
 
@@ -68,9 +70,22 @@ JNIEXPORT void JNI_OnLoad(JavaVM *vm, void *reserved) {
 3. Scan raw bytes for the string `"RegisterNatives"` (indicates the library calls it)
 4. Cross-reference with native methods from Step 1 to identify which methods are dynamically bound
 
+**Signal levels:**
+- `HIGH` — Both `RegisterNatives` string AND `JNI_OnLoad` exported symbol present
+- `MEDIUM` — `RegisterNatives` string present, `JNI_OnLoad` not exported
+- `LOW` — `JNI_OnLoad` present but no `RegisterNatives` string
+
+**Output:** `jni_dynamic_report.txt`
+
+**Resolution:**
+The actual Java→C mapping is extracted by `jfr_registernative_mapping.sh` which disassembles the `.so` to recover the `JNINativeMethod[]` array contents (method name, signature, function pointer).
+
+**Limitations:** Only works on non-stripped binaries with intact symbol tables. Pointer-based entries where the method name/sig aren't string literals cannot be resolved statically.
+
 ---
 
-## 3. JNA Interface Mapping- 
+## 3. JNA Interface Mapping
+
 **File:** `JnaIfaceDetector.java`
 
 **Java pattern:**
@@ -247,9 +262,9 @@ lib=c | symbol=getpid | iface=org.jruby.ext.ffi.LibC | api=LibraryLoader.create(
 All detectors use SootUp for bytecode analysis (Jimple IR) and are run against the target application's JAR directory:
 
 ```bash
-# JNI static (main pipeline entry point)
+# JNI static (Mode 1: scan <app-jars-dir>; add --runtime <dir> for staged java.base / modular JARs)
 java -cp "target/echotrace-1.0-SNAPSHOT.jar:target/deps/*" \
-  com.echotrace.app.bytecode_new.PrototypeFinal <jars-dir> <jars-dir> --1
+  com.echotrace.app.bytecode_new.PrototypeFinal <app-jars-dir> --1 [--runtime <runtime-jars-dir>]
 
 # JNA Interface Mapping
 java -cp "target/echotrace-1.0-SNAPSHOT.jar:target/deps/*" \

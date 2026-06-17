@@ -23,6 +23,9 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.jar.JarFile;
 import java.util.jar.JarEntry;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.net.MalformedURLException;
 
 /**
  * Native Method Tracer - ASM and SootUp Based Analysis
@@ -32,12 +35,20 @@ import java.util.jar.JarEntry;
  * Jimple analysis to trace native method calls and their execution paths.
  *
  * USAGE:
- *   java PrototypeFinal <target-directory> <dependencies-directory> [--1|--2]
+ *   java PrototypeFinal <target-directory> [<dependencies-directory>] [--1|--2] [--runtime DIR ...]
  *
  * INPUT REQUIREMENTS:
- *   - target-directory: Directory containing application JAR files to analyze
- *   - dependencies-directory: Directory containing dependency JAR files
+ *   - target-directory: Directory containing application JAR files to analyze (Mode 1 scans this directory only)
+ *   - dependencies-directory: Optional. Required for Mode 2 (--2): directory containing dependency JAR files.
+ *     Ignored for Mode 1 (--1); put app JARs under target-directory and use --runtime for JDK/runtime flat JARs.
  *   - mode: Analysis mode selector (--1 or --2)
+ *   - optional --runtime DIR: directory whose *.jar files are placed on the
+ *     hermetic URLClassLoader only (for resolving invokes into the JDK). These
+ *     JARs are NOT scanned in traceJarFiles, so e.g. java.base.jar does not
+ *     dump every JDK native — only classes reached via invoke chains are read.
+ *     Example: {@code --runtime RUNTIME_zookeeper_3.8/} (next token must be the path;
+ *     do not insert the literal word {@code DIR}).
+ *     Same effect as env {@code PROTOTYPE_RUNTIME_DIR} (single directory).
  *
  * ANALYSIS MODES:
  *   --1: Use HybridByteCodeTracer approach (ASM-based native method detection).
@@ -45,9 +56,14 @@ import java.util.jar.JarEntry;
  *   --2 (default): SootUp Visitor Pattern (Worklist-based, using Jimple instead of ASM).
  *        Use case: Jimple-based analysis for finding all reachable native methods
  *
- * OUTPUT FILES:
- *   - native_methods.txt: Results from hybrid bytecode tracer (mode 1)
- *   - sootup_visitor_natives.txt: Results from SootUp visitor pattern (mode 2)
+ * OUTPUT FILES (per-container):
+ *   Mode 1: derived from target-directory (same JARFILES_/outputs_ convention as before).
+ *   Mode 2: derived from dependencies-directory when present, otherwise target-directory.
+ *           For input  JARFILES_<IMG_SAFE>(_with_jdk)?  results land in
+ *              outputs_<IMG_SAFE>/native_methods.txt           (mode 1)
+ *              outputs_<IMG_SAFE>/sootup_visitor_natives.txt   (mode 2)
+ *   The output dir is created if missing.  Override with the system property
+ *   -Dprototype.output.dir=<path> when running.
  */
 public class PrototypeFinal {
     // Shared fields
@@ -57,7 +73,13 @@ public class PrototypeFinal {
 
     // HybridByteCodeTracer fields (Mode 1)
     private static String pathPrefix = "/home/rupesh.punna/Prototype/JARFILES/";
-    private static final String NATIVE_METHODS_FILE = "/home/rupesh.punna/Prototype/native_methods.txt";
+    /**
+     * Where Mode 1 writes its results.  Initialised to a CWD-relative fallback
+     * overridden per-run to <project_root>/outputs_<IMG_SAFE>/native_methods.txt
+     * by {@link #resolveOutputDir(String)} once the output anchor directory is known.
+     */
+    private static String NATIVE_METHODS_FILE = "native_methods.txt";
+    private static URLClassLoader targetClassLoader = null;
 
     /**
      * Main entry point for the Native Method Tracer
@@ -65,12 +87,12 @@ public class PrototypeFinal {
      * FUNCTION NAME: main
      *
      * USAGE:
-     *   java PrototypeFinal <target-directory> <dependencies-directory> [--1|--2]
+     *   java PrototypeFinal <target-directory> [<dependencies-directory>] [--1|--2] [--runtime DIR ...]
      *
      * INPUT REQUIRED:
-     *   - args[0]: target-directory - Directory containing application JAR files
-     *   - args[1]: dependencies-directory - Directory containing dependency JAR files
-     *   - args[2]: mode (optional) - Analysis mode selector (--1 or --2, default: --2)
+     *   - args[0]: target-directory - JARs to scan (Mode 1) or target JARs (Mode 2)
+     *   - optional: dependencies-directory — first non-flag argument after target; required for Mode 2
+     *   - flags: --1 (ASM), --2 (SootUp), --runtime DIR
      *
      * WHAT IT'S USED FOR:
      *   - Orchestrates the native method analysis workflow
@@ -86,45 +108,84 @@ public class PrototypeFinal {
      *   4. Generate output files with results
      */
     public static void main(String[] args) {
-        if (args.length < 2) {
-            System.err.println("Usage: java PrototypeFinal <target-directory> <dependencies-directory> [--1|--2]");
+        if (args.length < 1) {
+            System.err.println("Usage: java PrototypeFinal <target-directory> [<dependencies-directory>] [--1|--2] [--runtime DIR ...]");
+            System.err.println("  Mode 1 (--1): scans <target-directory> for *.jar; optional JDK/runtime JARs via --runtime or PROTOTYPE_RUNTIME_DIR.");
+            System.err.println("  Mode 2 (--2, default): needs <dependencies-directory> as the first non-flag argument after target (or pass target only and same dir for both app+deps if combined).");
             System.err.println("  --1: Use HybridByteCodeTracer approach (ASM-based native detection)");
             System.err.println("  --2: SootUp Visitor Pattern (Worklist-based, Jimple analysis) [DEFAULT]");
+            System.err.println("  --runtime DIR: JARs in DIR on classloader only (Mode 1); also PROTOTYPE_RUNTIME_DIR");
             return;
         }
 
         String targetDir = args[0];
-        String depsDir = args[1];
 
-        // Parse mode argument
         boolean hybridByteCodeTracer = false;
         boolean sootupVisitorPattern = false;
+        String depsDir = null;
+        boolean modeExplicit = false;
 
-        if (args.length >= 3) {
-            if ("--1".equals(args[2])) {
+        for (int i = 1; i < args.length; i++) {
+            String a = args[i];
+            if ("--1".equals(a)) {
                 hybridByteCodeTracer = true;
-                System.out.println("Mode 1: HybridByteCodeTracer approach (ASM-based)");
-            } else if ("--2".equals(args[2])) {
+                modeExplicit = true;
+            } else if ("--2".equals(a)) {
                 sootupVisitorPattern = true;
-                System.out.println("Mode 2: SootUp Visitor Pattern (Worklist-based)");
+                modeExplicit = true;
+            } else if ("--runtime".equals(a)) {
+                if (i + 1 >= args.length) {
+                    System.err.println("--runtime requires a directory argument");
+                    return;
+                }
+                i++;
+            } else if (!a.startsWith("--")) {
+                if (depsDir != null) {
+                    System.err.println("Unexpected extra positional argument: " + a);
+                    return;
+                }
+                depsDir = a;
             } else {
-                System.err.println("Invalid mode. Use --1 or --2");
+                System.err.println("Unknown flag: " + a);
                 return;
             }
-        } else {
+        }
+
+        if (!hybridByteCodeTracer && !sootupVisitorPattern) {
             sootupVisitorPattern = true;
-            System.out.println("Mode 2: SootUp Visitor Pattern (Worklist-based) [DEFAULT]");
+        }
+        if (hybridByteCodeTracer && sootupVisitorPattern) {
+            System.err.println("Specify at most one of --1 or --2");
+            return;
+        }
+        if (sootupVisitorPattern && (depsDir == null || depsDir.isEmpty())) {
+            System.err.println("Mode 2 requires <dependencies-directory> after <target-directory> (non-flag positional).");
+            return;
+        }
+
+        if (hybridByteCodeTracer && depsDir != null) {
+            System.out.println("INFO: Mode 1 ignores <dependencies-directory>; scanning JARs under target only: " + targetDir);
+        }
+
+        if (hybridByteCodeTracer) {
+            System.out.println("Mode 1: HybridByteCodeTracer approach (ASM-based)");
+        } else {
+            System.out.println("Mode 2: SootUp Visitor Pattern (Worklist-based)" + (!modeExplicit ? " [DEFAULT]" : ""));
         }
 
         System.out.println("=== PrototypeFinal: Native Method Tracer ===");
-        System.out.println("Analyzing target directory: " + targetDir);
-        System.out.println("Dependencies directory: " + depsDir);
+        System.out.println("Target directory: " + targetDir);
+        if (depsDir != null) {
+            System.out.println("Dependencies directory: " + depsDir);
+        }
+
+        List<File> runtimeJars = collectRuntimeJarDirectories(args);
 
         // Mode 1: HybridByteCodeTracer approach
         if (hybridByteCodeTracer) {
             System.out.println("\n=== Mode 1: HybridByteCodeTracer Approach ===");
             try {
-                runHybridByteCodeTracer(targetDir, depsDir);
+                runHybridByteCodeTracer(targetDir, runtimeJars);
             } catch (Exception e) {
                 System.err.println("Error running HybridByteCodeTracer: " + e.getMessage());
                 e.printStackTrace();
@@ -154,6 +215,91 @@ public class PrototypeFinal {
         }
     }
 
+    /**
+     * Derive the per-container output directory from an anchor directory (Mode 1: target;
+     * Mode 2: dependencies directory).
+     *
+     * Mapping (matches the JARFILES_/LIBS_/outputs_ convention used elsewhere
+     * in this repo: see mapped_updated.py, extract_container_jdk.py, etc.):
+     *
+     *   JARFILES_solr_8.7.0_with_jdk    -> outputs_solr_8.7.0
+     *   JARFILES_zookeeper_3.4.14       -> outputs_zookeeper_3.4.14
+     *   JARFILES_cassandra_5.0.6-bookworm -> outputs_cassandra_5.0.6-bookworm
+     *   /tmp/some_other_dir             -> outputs_some_other_dir
+     *
+     * The output directory is created if it does not exist.  An explicit
+     * override is honoured via the system property `prototype.output.dir`.
+     * Returns an absolute path string.
+     */
+    private static String resolveOutputDir(String anchorDir) {
+        String override = System.getProperty("prototype.output.dir");
+        if (override != null && !override.isEmpty()) {
+            File od = new File(override);
+            if (!od.exists()) od.mkdirs();
+            return od.getAbsolutePath();
+        }
+        File anchor = new File(anchorDir).getAbsoluteFile();
+        String basename = anchor.getName();
+        String imgSafe = basename;
+        if (imgSafe.startsWith("JARFILES_")) {
+            imgSafe = imgSafe.substring("JARFILES_".length());
+        }
+        if (imgSafe.endsWith("_with_jdk")) {
+            imgSafe = imgSafe.substring(0, imgSafe.length() - "_with_jdk".length());
+        }
+        if (imgSafe.isEmpty()) imgSafe = "default";
+        File parent = anchor.getParentFile();
+        File outDir = (parent != null)
+                ? new File(parent, "outputs_" + imgSafe)
+                : new File("outputs_" + imgSafe);
+        if (!outDir.exists()) outDir.mkdirs();
+        return outDir.getAbsolutePath();
+    }
+
+    /**
+     * JARs from runtime directories: used on the URLClassLoader for invoke
+     * resolution only (Mode 1). Not scanned by {@link #traceJarFiles}.
+     * Sources: {@code PROTOTYPE_RUNTIME_DIR}, then any {@code --runtime DIR}
+     * pairs in {@code args} after {@code args[0]} (tokens {@code --1} / {@code --2} are skipped).
+     */
+    private static List<File> collectRuntimeJarDirectories(String[] args) {
+        LinkedHashSet<File> jars = new LinkedHashSet<>();
+        String env = System.getenv("PROTOTYPE_RUNTIME_DIR");
+        if (env != null && !env.isEmpty()) {
+            addRuntimeJarsFromDirectory(new File(env), jars);
+        }
+        for (int i = 1; i < args.length; i++) {
+            if ("--1".equals(args[i]) || "--2".equals(args[i])) {
+                continue;
+            }
+            if ("--runtime".equals(args[i]) && i + 1 < args.length) {
+                addRuntimeJarsFromDirectory(new File(args[++i]), jars);
+            }
+        }
+        return new ArrayList<>(jars);
+    }
+
+    private static void addRuntimeJarsFromDirectory(File dir, LinkedHashSet<File> out) {
+        if (!dir.isDirectory()) {
+            System.err.println("ERROR: --runtime / PROTOTYPE_RUNTIME_DIR is not a directory: "
+                    + dir.getAbsolutePath()
+                    + " — invoke tracing cannot load JDK/application classes from the runtime JARs.");
+            return;
+        }
+        File[] list = dir.listFiles((d, name) -> name.endsWith(".jar"));
+        if (list == null || list.length == 0) {
+            System.err.println("WARN: No .jar files under runtime directory: " + dir.getAbsolutePath()
+                    + " — did you pass a typo? (Use: --runtime /path/to/dir, not the word DIR.)");
+            return;
+        }
+        Arrays.sort(list, Comparator.comparing(File::getName));
+        for (File f : list) {
+            if (f.isFile()) {
+                out.add(f.getAbsoluteFile());
+            }
+        }
+    }
+
 
     /**
      * Executes HybridByteCodeTracer analysis (Mode 1)
@@ -164,18 +310,18 @@ public class PrototypeFinal {
      *   Called internally when --1 mode is selected
      * 
      * INPUT REQUIRED:
-     *   - targetDir: Directory containing target application JAR files
-     *   - depsDir: Directory containing dependency JAR files
-     * 
+     *   - targetDir: Directory containing application JAR files to scan (all *.jar are analyzed)
+     *   - runtimeOnlyJars: Optional runtime flat JARs (e.g. java.base) on the loader only
+     *
      * WHAT IT'S USED FOR:
      *   - Performs ASM-based bytecode analysis for native method detection
      *   - Scans JAR files using ASM ClassReader to find native methods
      *   - Traces method calls through bytecode instructions
      *   - Generates comprehensive native method usage report
      *   - Provides performance timing information
-     * 
+     *
      * PROCESS:
-     *   1. Set up path prefix for dependency directory
+     *   1. Set up path prefix to targetDir (same directory lists scan roots)
      *   2. Get list of JAR files to analyze
      *   3. Extract class files from each JAR
      *   4. Use ASM to analyze bytecode for native method calls
@@ -183,14 +329,18 @@ public class PrototypeFinal {
      *   6. Write results to output file
      *   7. Display performance metrics
      */
-    private static void runHybridByteCodeTracer(String targetDir, String depsDir) throws IOException {
+    private static void runHybridByteCodeTracer(String targetDir, List<File> runtimeOnlyJars) throws IOException {
         System.out.println("Starting HybridByteCodeTracer analysis...");
-        
-        // Set the path prefix to the dependencies directory
-        pathPrefix = depsDir;
+
+        pathPrefix = targetDir;
         if (!pathPrefix.endsWith("/")) {
             pathPrefix += "/";
         }
+
+        // Pin the Mode-1 results file under outputs_<IMG_SAFE>/ derived from targetDir.
+        String outputDir = resolveOutputDir(targetDir);
+        NATIVE_METHODS_FILE = outputDir + "/native_methods.txt";
+        System.out.println("INFO: Output directory: " + outputDir);
 
         long startTime = System.currentTimeMillis();
         List<String> jarPathResult = new ArrayList<>();
@@ -218,7 +368,53 @@ public class PrototypeFinal {
             classPathResult.addAll(findJarClass.findClass(jarPath));
             nativeMethodResult.addAll(findNativeMethods.findNativeMethods(jarPath));
         }
-        
+
+        // Build a URLClassLoader from target JARs so that MethodPrinter
+        // resolves classes from the target application, not the analysis JVM.
+        List<URL> jarUrls = new ArrayList<>();
+        for (String jp : jarPathResult) {
+            try {
+                File jf = new File(pathPrefix + jp);
+                if (jf.exists()) {
+                    jarUrls.add(jf.toURI().toURL());
+                }
+            } catch (MalformedURLException e) {
+                System.err.println("Bad JAR URL: " + pathPrefix + jp);
+            }
+        }
+        for (File rj : runtimeOnlyJars) {
+            try {
+                if (rj.exists() && rj.isFile()) {
+                    jarUrls.add(rj.toURI().toURL());
+                } else {
+                    System.err.println("WARN: Runtime JAR missing, skipping: " + rj);
+                }
+            } catch (MalformedURLException e) {
+                System.err.println("Bad runtime JAR URL: " + rj);
+            }
+        }
+        targetClassLoader = new URLClassLoader(jarUrls.toArray(new URL[0]), null) {
+            @Override
+            public InputStream getResourceAsStream(String name) {
+                // Only search target JARs — skip bootstrap classloader delegation
+                // to prevent JDK 11 classes leaking into JDK 8 analysis results.
+                URL url = findResource(name);
+                if (url == null) return null;
+                try { return url.openStream(); }
+                catch (IOException e) { return null; }
+            }
+        };
+        System.out.println("INFO: Target classloader: " + jarPathResult.size()
+                + " scan JARs under target + " + runtimeOnlyJars.size() + " runtime (invoke-only) JARs"
+                + " = " + jarUrls.size() + " URLs total");
+
+        if (!runtimeOnlyJars.isEmpty()) {
+            System.out.println("INFO: Runtime (invoke-only) JARs — not exhaustively scanned:");
+            for (File rj : runtimeOnlyJars) {
+                System.out.println("    " + rj.getAbsolutePath());
+            }
+        }
+
         System.out.println("DEBUG: classpath: " + classPathResult);
         System.out.println(classPathResult.size());
         System.out.println("There are " + classPathResult.size() + " classes over all\n");
@@ -229,7 +425,12 @@ public class PrototypeFinal {
         bct.traceJarFiles(jarPathResult);
         bct.prettyPrint();
         bct.writeToFile();
-        
+
+        if (targetClassLoader != null) {
+            try { targetClassLoader.close(); } catch (IOException e) { /* ignore */ }
+            targetClassLoader = null;
+        }
+
         long endTime = System.currentTimeMillis();
         long totalTime = endTime - startTime;
         double totalTimeInSeconds = (double) totalTime / 1000;
@@ -443,8 +644,9 @@ public class PrototypeFinal {
             }
         }
 
-        // Write results
-        String outputFile = "sootup_visitor_natives.txt";
+        // Write results to the same outputs_<IMG_SAFE>/ directory used by Mode 1.
+        String outputDir = resolveOutputDir(depsDir);
+        String outputFile = outputDir + "/sootup_visitor_natives.txt";
         writeMode2Results(outputFile, nativeMethods, visitedMethods.size());
 
         // Call graph and call chain generation removed
@@ -840,11 +1042,24 @@ public class PrototypeFinal {
 
             Util.visitedMethod.add(className+name+descriptor);
             try {
-                ClassReader cr = new ClassReader(className);
+                String resourceName = className.replace('.', '/') + ".class";
+                InputStream is = null;
+                if (targetClassLoader != null) {
+                    is = targetClassLoader.getResourceAsStream(resourceName);
+                    // jmod / tooling sometimes leaves entries under classes/ rather than JAR root
+                    if (is == null) {
+                        is = targetClassLoader.getResourceAsStream("classes/" + resourceName);
+                    }
+                }
+                if (is == null) {
+                    return;
+                }
+                ClassReader cr = new ClassReader(is);
+                is.close();
                 ClassFilter cf = new ClassFilter(name+descriptor);
                 cr.accept(cf, 0);
             } catch (IOException e) {
-                // System.out.println("oops exception.. " + className + " " + name + " " + descriptor);
+                // Class not found in target JARs — skip
             }
 
             super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);

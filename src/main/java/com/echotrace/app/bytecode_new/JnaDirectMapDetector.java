@@ -1,29 +1,23 @@
 package com.echotrace.app.bytecode_new;
 
-import sootup.core.inputlocation.AnalysisInputLocation;
 import sootup.core.jimple.basic.Immediate;
 import sootup.core.jimple.basic.Local;
 import sootup.core.jimple.basic.Value;
+import sootup.core.jimple.common.constant.ClassConstant;
 import sootup.core.jimple.common.constant.StringConstant;
 import sootup.core.jimple.common.expr.AbstractInvokeExpr;
 import sootup.core.jimple.common.stmt.JAssignStmt;
-import sootup.core.jimple.common.stmt.JInvokeStmt;
+import sootup.core.jimple.common.stmt.JReturnStmt;
 import sootup.core.jimple.common.stmt.Stmt;
 import sootup.core.model.SootClass;
 import sootup.core.model.SootMethod;
 import sootup.core.signatures.MethodSignature;
-import sootup.core.types.ClassType;
-import sootup.core.views.View;
-import sootup.java.bytecode.frontend.inputlocation.JavaClassPathAnalysisInputLocation;
-import sootup.java.bytecode.frontend.inputlocation.DefaultRuntimeAnalysisInputLocation;
-import sootup.java.core.views.JavaView;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.stream.Collectors;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
+
+import static com.echotrace.app.bytecode_new.DetectorSupport.*;
 
 /**
  * JNA Direct Mapping Detector (Target-only analysis)
@@ -36,55 +30,57 @@ import java.util.zip.ZipFile;
  *   CLibrary.strlen("hello")  ->  lib="c", symbol="strlen"
  *
  * The library name comes from Native.register("c") or
- * Native.register(NativeLibrary.getInstance("c", ...))
- * The symbol name is the native method name itself (JNA convention)
+ * Native.register(NativeLibrary.getInstance("c", ...)).
+ * The symbol name is the native method name itself (JNA convention).
+ *
+ * For Native.register(Class, ...) the registered class is the Class
+ * ARGUMENT (resolved from a class constant when possible), not the class
+ * containing the call site.
  *
  * Usage:
  *   mvn exec:java -Dexec.mainClass=com.echotrace.app.bytecode_new.JnaDirectMapDetector \
- *     -Dexec.args="<target-jars-dir> [outDir]"
+ *     -Dexec.args="<target-jars-dir> [outDir]" \
+ *     [-Ddetector.runtime.dir=<extra-classpath-dir>] [-Ddetector.debug=true]
  *
  * Outputs:
  *   - jna_directmap_hits.txt   (native method declarations with lib/symbol/jar)
  *   - skipped_methods.txt      (methods that failed analysis)
  */
-public class JnaDirectMapDetector {
+public final class JnaDirectMapDetector {
 
-    // Enable debug logging for troubleshooting
-    private static final boolean DEBUG = false;
-
-    // JNA class names for detection
-    private static final String JNA_NATIVE  = "com.sun.jna.Native";
+    private static final String JNA_NATIVE         = "com.sun.jna.Native";
     private static final String JNA_NATIVE_LIBRARY = "com.sun.jna.NativeLibrary";
 
-    // API pattern constants for classification
     private static final String API_REGISTER_STRING              = "Native.register(String)";
     private static final String API_REGISTER_CLASS_STRING        = "Native.register(Class,String)";
     private static final String API_REGISTER_NATIVELIBRARY       = "Native.register(NativeLibrary)";
     private static final String API_REGISTER_CLASS_NATIVELIBRARY = "Native.register(Class,NativeLibrary)";
     private static final String API_UNKNOWN                      = "<?>";
+    private static final String UNRESOLVED_LIB                   = "<?>";
 
-    // Track which classes call Native.register() and with what library name + API pattern
-    // Key = fully qualified class name, Value = RegisterInfo(lib, apiPattern)
-    private static final Map<String, RegisterInfo> CLASS_TO_REG = new HashMap<>();
+    /** Max fixed-point iterations when summarizing string-returning helpers. */
+    private static final int MAX_SUMMARY_ITERATIONS = 5;
+
+    // Instance state (no mutable statics: safe to reuse / run twice / test).
+    /** registered class FQCN -> RegisterInfo(lib, apiPattern) */
+    private final Map<String, RegisterInfo> classToReg = new HashMap<>();
+    /** method signature -> constant String it returns (helper summaries) */
+    private final Map<String, String> methodStringReturns = new HashMap<>();
 
     private static final class RegisterInfo {
         final String lib;
         final String apiPattern;
+
         RegisterInfo(String lib, String apiPattern) {
             this.lib = lib;
             this.apiPattern = apiPattern;
         }
+
+        boolean isResolved() {
+            return !UNRESOLVED_LIB.equals(lib);
+        }
     }
 
-    /**
-     * Main entry point for JNA direct mapping detector.
-     *
-     * Parses command line arguments, sets up the SootUp analysis environment,
-     * and runs the two-pass analysis to detect JNA direct-mapped calls.
-     *
-     * @param args Command line arguments: <target-jars-dir> [outDir]
-     * @throws IOException If file operations fail
-     */
     public static void main(String[] args) throws IOException {
         if (args.length < 1) {
             System.err.println("Usage: JnaDirectMapDetector <target-jars-dir> [outDir]");
@@ -92,44 +88,33 @@ public class JnaDirectMapDetector {
         }
 
         String targetDir = args[0];
-        String outDir    = (args.length >= 2) ? args[1] : ".";
+        String outDir = (args.length >= 2) ? args[1] : deriveDefaultOutDir(targetDir);
 
         File out = new File(outDir);
         if (!out.exists() && !out.mkdirs()) {
             throw new IOException("Failed to create outDir: " + out.getAbsolutePath());
         }
 
+        new JnaDirectMapDetector().run(AnalysisContext.build(targetDir), out);
+    }
+
+    /** Runs over a shared, pre-parsed context (standalone main builds its own). */
+    void run(AnalysisContext ctx, File out) throws IOException {
         File hitsFile = new File(out, "jna_directmap_hits.txt");
         File skippedFile = new File(out, "skipped_methods.txt");
 
-        // Collect target jars
-        List<String> targetJars = collectJarPaths(targetDir);
+        // Framework/runtime jars stay on the analysis classpath, but are
+        // not scanned as application targets (ctx.targetClassesScan).
+        Map<String, String> nativeLibraryNames = ctx.nativeLibraryNames;
+        Map<String, String> classToJar = ctx.classToJarScan;
+        List<SootClass> targetClasses = ctx.targetClassesScan;
+        System.out.println("[DIRECTMAP] classes=" + targetClasses.size() + " out=" + out.getAbsolutePath());
 
-        System.out.println("[INFO] target jars: " + targetJars.size());
-
-        // Index target classes for filtering (className -> jarPath)
-        Map<String, String> classToJar = collectClassNamesFromJars(targetJars);
-        Set<String> targetClassNames = classToJar.keySet();
-        System.out.println("[INFO] target classes indexed: " + targetClassNames.size());
-
-        // Build classpath from target jars
-        String cp = toClassPath(targetJars);
-        System.out.println("[INFO] sootup cp entries: " + targetJars.size());
-        System.out.println("[INFO] scanning target classes for JNA direct-mapped calls");
-        System.out.println("       target=" + targetDir);
-        System.out.println("       out   =" + out.getAbsolutePath());
-
-        // Setup SootUp analysis with target jars and JRE runtime
-        List<AnalysisInputLocation> inputs = new ArrayList<>();
-        inputs.add(new JavaClassPathAnalysisInputLocation(cp));
-        inputs.add(new DefaultRuntimeAnalysisInputLocation());
-
-        JavaView view = new JavaView(inputs);
-
-        // Process classes and write results to output files
         try (
-                BufferedWriter hitW = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(hitsFile), StandardCharsets.UTF_8));
-                BufferedWriter skipW = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(skippedFile), StandardCharsets.UTF_8))
+                BufferedWriter hitW = new BufferedWriter(new OutputStreamWriter(
+                        new FileOutputStream(hitsFile), StandardCharsets.UTF_8));
+                BufferedWriter skipW = new BufferedWriter(new OutputStreamWriter(
+                        new FileOutputStream(skippedFile), StandardCharsets.UTF_8))
         ) {
             hitW.write("=== JNA Direct Mapping Hits ===\n");
             hitW.write("Format: methodSig | lib | symbol | apiPattern | jar\n\n");
@@ -137,83 +122,100 @@ public class JnaDirectMapDetector {
             skipW.write("=== Skipped Methods (VerifyError/Exceptions) ===\n");
             skipW.write("Format: methodSig | exceptionType | message\n\n");
 
-            long classesSeen = 0;
-            long targetClassesScanned = 0;
-            long clinitScanned = 0;
             long hits = 0;
             long skipped = 0;
 
-            // Collect target classes from the view
-            List<SootClass> targetClasses = new ArrayList<>();
-            for (Iterator<? extends SootClass> it = view.getClasses().iterator(); it.hasNext();) {
-                SootClass sc = it.next();
-                classesSeen++;
-                String fqcn = sc.getType().getFullyQualifiedName();
-                if (targetClassNames.contains(fqcn)) {
-                    targetClasses.add(sc);
+            // ============================================================
+            // PASS 0: Summarize helpers that return constant Strings, e.g.
+            //   static String libName() { return "c"; }
+            // Iterated to a fixed point so helpers calling helpers resolve too.
+            // ============================================================
+            System.out.println("[PASS 0] Summarizing string-return helper methods...");
+            int iterations = 0;
+            boolean changed = true;
+            while (changed && iterations++ < MAX_SUMMARY_ITERATIONS) {
+                changed = false;
+                for (SootClass sc : targetClasses) {
+                    for (SootMethod m : sc.getMethods()) {
+                        String sig = m.getSignature().toString();
+                        if (methodStringReturns.containsKey(sig)) continue;
+                        try {
+                            if (!m.hasBody()) continue;
+                            String s = summarizeStringReturn(m);
+                            if (s != null) {
+                                methodStringReturns.put(sig, s);
+                                changed = true;
+                            }
+                        } catch (VerifyError | RuntimeException e) {
+                            // Logged in PASS 1, where the same method is visited again.
+                            if (DEBUG) {
+                                System.out.println("[DBG] PASS0 skip " + sig + ": " + e);
+                            }
+                        }
+                    }
                 }
             }
-            targetClassesScanned = targetClasses.size();
-
-            System.out.println("[INFO] collected " + targetClassesScanned + " target classes for analysis");
+            System.out.println("[PASS 0] String helper summaries: " + methodStringReturns.size()
+                    + " (in " + iterations + " iteration(s))");
 
             // ============================================================
-            // PASS 1: Process all <clinit> methods to find Native.register() calls
-            // This captures: static { Native.register("c"); }
-            //           and: static { Native.register(NativeLibrary.getInstance("c", ...)); }
+            // PASS 1: Scan all method bodies for Native.register() calls.
+            // Captures: static { Native.register("c"); }
+            //      and: static { Native.register(NativeLibrary.getInstance("c", ...)); }
+            //      and: Native.register(SomeClass.class, "c") in helper/init methods,
+            //           attributed to SomeClass (the Class argument), not the caller.
             // ============================================================
-            System.out.println("[PASS 1] Processing <clinit> methods to find Native.register() calls...");
+            System.out.println("[PASS 1] Processing methods to find Native.register() calls...");
 
+            long methodsScanned = 0;
             for (SootClass sc : targetClasses) {
                 String className = sc.getType().getFullyQualifiedName();
                 for (SootMethod m : sc.getMethods()) {
-                    if (!m.getName().equals("<clinit>")) continue;
                     try {
                         if (!m.hasBody()) continue;
-                        RegisterInfo regInfo = findRegisterCall(m);
-                        if (regInfo != null) {
-                            CLASS_TO_REG.put(className, regInfo);
-                            if (DEBUG) {
-                                System.out.println("[DBG] REGISTER: " + className + " -> lib=" + regInfo.lib + " api=" + regInfo.apiPattern);
-                            }
+                        methodsScanned++;
+                        for (Map.Entry<String, RegisterInfo> e : findRegisterCalls(m, className).entrySet()) {
+                            recordRegistration(e.getKey(), e.getValue());
                         }
-                        clinitScanned++;
                     } catch (VerifyError e) {
                         skipped++;
                         skipW.write(m.getSignature() + " | VerifyError | " + e.getMessage() + "\n");
                     } catch (Exception e) {
                         skipped++;
-                        skipW.write(m.getSignature() + " | " + e.getClass().getSimpleName() + " | " + e.getMessage() + "\n");
+                        skipW.write(m.getSignature() + " | " + e.getClass().getSimpleName()
+                                + " | " + e.getMessage() + "\n");
                     }
                 }
             }
-            System.out.println("[PASS 1] Scanned " + clinitScanned + " <clinit> methods");
-            System.out.println("[PASS 1] Found " + CLASS_TO_REG.size() + " classes with Native.register()");
+            System.out.println("[PASS 1] Scanned " + methodsScanned + " methods");
+            System.out.println("[PASS 1] Found " + classToReg.size() + " classes with Native.register()");
 
             // ============================================================
-            // PASS 2: For each class with Native.register(), find all native methods
+            // PASS 2: For each registered class, emit all native methods.
             // ============================================================
             System.out.println("[PASS 2] Collecting native methods from registered classes...");
 
             for (SootClass sc : targetClasses) {
                 String className = sc.getType().getFullyQualifiedName();
-                RegisterInfo regInfo = CLASS_TO_REG.get(className);
-                if (regInfo == null) continue; // Class doesn't call Native.register()
+                RegisterInfo regInfo = classToReg.get(className);
+                if (regInfo == null) continue;
 
-                String jarFile = classToJar.get(className);
+                String jarFile = classToJar.getOrDefault(className, "<?>");
 
-                // Find all native methods in this class
                 for (SootMethod m : sc.getMethods()) {
                     if (!m.isNative()) continue;
 
                     String methodSig = m.getSignature().toString();
-                    String symbol = m.getName(); // Symbol = method name
+                    String symbol = m.getName(); // JNA convention: symbol = method name
 
                     hits++;
-                    hitW.write(methodSig + " | " + regInfo.lib + " | " + symbol + " | " + regInfo.apiPattern + " | " + jarFile + "\n");
+                    String lib = NativeLibraryNames.resolve(regInfo.lib, nativeLibraryNames);
+                    hitW.write(methodSig + " | " + lib + " | " + symbol + " | "
+                            + regInfo.apiPattern + " | " + jarFile + "\n");
 
                     if (DEBUG) {
-                        System.out.println("[DBG] HIT: " + methodSig + " | lib=" + regInfo.lib + " | symbol=" + symbol + " | api=" + regInfo.apiPattern);
+                        System.out.println("[DBG] HIT: " + methodSig + " | lib=" + regInfo.lib
+                                + " | symbol=" + symbol + " | api=" + regInfo.apiPattern);
                     }
                 }
             }
@@ -226,60 +228,87 @@ public class JnaDirectMapDetector {
     }
 
     /**
-     * Scans a <clinit> method for calls to Native.register(...).
+     * Records a registration, never letting an unresolved entry ("<?>")
+     * overwrite a previously resolved library name.
+     */
+    private void recordRegistration(String className, RegisterInfo info) {
+        RegisterInfo prev = classToReg.get(className);
+        if (prev == null || (!prev.isResolved() && info.isResolved())) {
+            classToReg.put(className, info);
+            if (DEBUG) {
+                System.out.println("[DBG] REGISTER: " + className + " -> lib=" + info.lib
+                        + " api=" + info.apiPattern);
+            }
+        }
+    }
+
+    /**
+     * Scans a method body for ALL calls to Native.register(...).
      *
-     * Looks for invocations of:
+     * Handles:
      *   - Native.register(String libName)
      *   - Native.register(Class, String libName)
      *   - Native.register(NativeLibrary)
      *   - Native.register(Class, NativeLibrary)
      *
-     * Tracks string literals passed as the library name argument.
-     * Also tracks NativeLibrary.getInstance(String, ...) calls to resolve
-     * the library name when Native.register(NativeLibrary) is used.
+     * Tracks string constants (directly assigned, copied between locals, or
+     * returned by summarized helper methods), NativeLibrary.getInstance(...)
+     * results, and class constants (for the Class-argument variants).
      *
-     * @param clinit The <clinit> method to analyze
-     * @return RegisterInfo with lib name and API pattern, or null if no register call found
+     * @param method        the method to analyze
+     * @param declaringClass FQCN of the method's declaring class; used as the
+     *                      registered class for the no-Class-arg variants and
+     *                      as fallback when the Class argument is not constant
+     * @return map of registered class FQCN -> RegisterInfo (possibly empty)
      */
-    private static RegisterInfo findRegisterCall(SootMethod clinit) {
+    private Map<String, RegisterInfo> findRegisterCalls(SootMethod method, String declaringClass) {
+        Map<String, RegisterInfo> result = new HashMap<>();
         Map<Local, String> localToString = new HashMap<>();
-        Map<Local, String> nativeLibraryToLib = new HashMap<>();  // Track NativeLibrary objects
+        Map<Local, String> localToClassName = new HashMap<>();
+        Map<Local, String> nativeLibraryToLib = new HashMap<>();
 
-        for (Stmt stmt : clinit.getBody().getStmts()) {
-            // Track local = StringConstant
+        for (Stmt stmt : method.getBody().getStmts()) {
             if (stmt instanceof JAssignStmt) {
                 JAssignStmt as = (JAssignStmt) stmt;
                 Value lhs = as.getLeftOp();
                 Value rhs = as.getRightOp();
 
-                if (lhs instanceof Local && rhs instanceof StringConstant) {
-                    String str = ((StringConstant) rhs).getValue();
-                    localToString.put((Local) lhs, str);
-                }
+                if (lhs instanceof Local) {
+                    Local lhsLocal = (Local) lhs;
+                    // Invalidate stale facts: this local is being redefined.
+                    localToString.remove(lhsLocal);
+                    localToClassName.remove(lhsLocal);
+                    nativeLibraryToLib.remove(lhsLocal);
 
-                // Track local = NativeLibrary.getInstance(String libName, ...)
-                if (lhs instanceof Local && rhs instanceof AbstractInvokeExpr) {
-                    AbstractInvokeExpr inv = (AbstractInvokeExpr) rhs;
-                    MethodSignature sig = inv.getMethodSignature();
-                    String declClass = sig.getDeclClassType().getFullyQualifiedName();
-                    String methodName = sig.getName();
+                    if (rhs instanceof StringConstant) {
+                        localToString.put(lhsLocal, ((StringConstant) rhs).getValue());
+                    } else if (rhs instanceof ClassConstant) {
+                        localToClassName.put(lhsLocal, classConstantToFqcn((ClassConstant) rhs));
+                    } else if (rhs instanceof Local) {
+                        // Propagate copies: a = b
+                        Local rhsLocal = (Local) rhs;
+                        copyIfPresent(localToString, rhsLocal, lhsLocal);
+                        copyIfPresent(localToClassName, rhsLocal, lhsLocal);
+                        copyIfPresent(nativeLibraryToLib, rhsLocal, lhsLocal);
+                    } else if (rhs instanceof AbstractInvokeExpr) {
+                        AbstractInvokeExpr inv = (AbstractInvokeExpr) rhs;
+                        MethodSignature sig = inv.getMethodSignature();
 
-                    if (declClass.equals(JNA_NATIVE_LIBRARY) && methodName.equals("getInstance")) {
-                        List<Immediate> args = inv.getArgs();
-                        if (!args.isEmpty()) {
-                            Immediate firstArg = args.get(0);
-                            String libName = null;
+                        // local = helperReturningConstantString()
+                        String returnedString = methodStringReturns.get(sig.toString());
+                        if (returnedString != null) {
+                            localToString.put(lhsLocal, returnedString);
+                        }
 
-                            if (firstArg instanceof StringConstant) {
-                                libName = ((StringConstant) firstArg).getValue();
-                            } else if (firstArg instanceof Local) {
-                                libName = localToString.get((Local) firstArg);
-                            }
-
+                        // local = NativeLibrary.getInstance(libName, ...)
+                        if (JNA_NATIVE_LIBRARY.equals(sig.getDeclClassType().getFullyQualifiedName())
+                                && "getInstance".equals(sig.getName())) {
+                            String libName = resolveStringArg(inv, localToString, 0);
                             if (libName != null) {
-                                nativeLibraryToLib.put((Local) lhs, libName);
+                                nativeLibraryToLib.put(lhsLocal, libName);
                                 if (DEBUG) {
-                                    System.out.println("[DBG] NativeLibrary.getInstance: " + lhs + " -> lib=" + libName);
+                                    System.out.println("[DBG] NativeLibrary.getInstance: "
+                                            + lhsLocal + " -> lib=" + libName);
                                 }
                             }
                         }
@@ -287,165 +316,128 @@ public class JnaDirectMapDetector {
                 }
             }
 
-            // Look for Native.register(...) invocations
+            // Look for Native.register(...) invocations (do NOT stop at the
+            // first one: a helper may register several classes).
             AbstractInvokeExpr inv = getInvoke(stmt);
+            if (inv == null) continue;
 
-            if (inv != null) {
-                MethodSignature sig = inv.getMethodSignature();
-                String declClass = sig.getDeclClassType().getFullyQualifiedName();
-                String methodName = sig.getName();
+            MethodSignature sig = inv.getMethodSignature();
+            if (!JNA_NATIVE.equals(sig.getDeclClassType().getFullyQualifiedName())
+                    || !"register".equals(sig.getName())) {
+                continue;
+            }
 
-                if (declClass.equals(JNA_NATIVE) && methodName.equals("register")) {
-                    List<Immediate> args = inv.getArgs();
-                    int argCount = args.size();
+            List<Immediate> args = inv.getArgs();
+            List<?> paramTypes = sig.getSubSignature().getParameterTypes();
+            boolean hasClassParam = !paramTypes.isEmpty()
+                    && "java.lang.Class".equals(paramTypes.get(0).toString());
 
-                    // Classify by checking parameter types
-                    List<?> paramTypes = sig.getSubSignature().getParameterTypes();
-                    boolean hasClassParam = !paramTypes.isEmpty()
-                            && paramTypes.get(0).toString().equals("java.lang.Class");
-
-                    // Try to resolve String argument (Pattern 1 & 2)
-                    for (Immediate arg : args) {
-                        if (arg instanceof StringConstant) {
-                            String lib = ((StringConstant) arg).getValue();
-                            String api = hasClassParam ? API_REGISTER_CLASS_STRING : API_REGISTER_STRING;
-                            return new RegisterInfo(lib, api);
-                        }
-                        if (arg instanceof Local) {
-                            String str = localToString.get((Local) arg);
-                            if (str != null) {
-                                String api = hasClassParam ? API_REGISTER_CLASS_STRING : API_REGISTER_STRING;
-                                return new RegisterInfo(str, api);
-                            }
-                        }
-                    }
-
-                    // Try NativeLibrary argument (Pattern 3 & 4)
-                    for (Immediate arg : args) {
-                        if (arg instanceof Local) {
-                            String libName = nativeLibraryToLib.get((Local) arg);
-                            if (libName != null) {
-                                String api = hasClassParam ? API_REGISTER_CLASS_NATIVELIBRARY : API_REGISTER_NATIVELIBRARY;
-                                if (DEBUG) {
-                                    System.out.println("[DBG] Resolved " + api + " -> lib=" + libName);
-                                }
-                                return new RegisterInfo(libName, api);
-                            }
-                        }
-                    }
-
-                    // Couldn't resolve library name
-                    return new RegisterInfo("<?>", API_UNKNOWN);
+            // Which class is being registered?
+            String registeredClass = declaringClass;
+            if (hasClassParam && !args.isEmpty()) {
+                Immediate classArg = args.get(0);
+                if (classArg instanceof ClassConstant) {
+                    registeredClass = classConstantToFqcn((ClassConstant) classArg);
+                } else if (classArg instanceof Local) {
+                    String resolved = localToClassName.get(classArg);
+                    if (resolved != null) registeredClass = resolved;
+                    // else: non-constant Class arg; fall back to declaring class
                 }
             }
-        }
 
-        return null;
-    }
-
-    // ------------------- Jar scanning helpers -------------------
-
-    /**
-     * Recursively collects all JAR file paths from a directory.
-     *
-     * Uses a non-recursive stack-based approach to traverse the directory tree
-     * and collect all files ending with ".jar".
-     *
-     * @param dirPath The root directory to scan
-     * @return Sorted list of absolute paths to JAR files
-     */
-    private static List<String> collectJarPaths(String dirPath) {
-        List<String> jars = new ArrayList<>();
-        File root = new File(dirPath);
-
-        if (!root.exists() || !root.isDirectory()) {
-            System.err.println("[ERROR] Invalid directory: " + dirPath);
-            return jars;
-        }
-
-        Stack<File> stack = new Stack<>();
-        stack.push(root);
-
-        while (!stack.isEmpty()) {
-            File cur = stack.pop();
-            File[] files = cur.listFiles();
-            if (files == null) continue;
-            for (File f : files) {
-                if (f.isDirectory()) stack.push(f);
-                else if (f.getName().endsWith(".jar")) jars.add(f.getAbsolutePath());
-            }
-        }
-
-        Collections.sort(jars);
-        return jars;
-    }
-
-    /**
-     * Extracts all class names from a list of JAR files.
-     *
-     * Scans each JAR file's entries and collects fully qualified class names
-     * by converting .class file paths to dot-separated package names.
-     * Excludes module-info.class files. Maps each class to its source JAR.
-     *
-     * @param jarPaths List of JAR file paths to scan
-     * @return Map of fully qualified class names to their source JAR file paths
-     */
-    private static Map<String, String> collectClassNamesFromJars(List<String> jarPaths) {
-        Map<String, String> classToJar = new HashMap<>();
-        for (String jar : jarPaths) {
-            // Extract just the JAR filename for cleaner output
-            String jarName = new File(jar).getName();
-            try (ZipFile zf = new ZipFile(jar)) {
-                Enumeration<? extends ZipEntry> en = zf.entries();
-                while (en.hasMoreElements()) {
-                    ZipEntry e = en.nextElement();
-                    String name = e.getName();
-                    if (name.endsWith(".class") && !name.contains("module-info")) {
-                        String cls = name.substring(0, name.length() - 6).replace('/', '.');
-                        classToJar.put(cls, jarName);
+            // Library name: String argument (patterns 1 & 2) ...
+            RegisterInfo info = null;
+            int libArgIdx = hasClassParam ? 1 : 0;
+            String libFromString = resolveStringArg(inv, localToString, libArgIdx);
+            if (libFromString != null) {
+                info = new RegisterInfo(libFromString,
+                        hasClassParam ? API_REGISTER_CLASS_STRING : API_REGISTER_STRING);
+            } else {
+                // ... or a NativeLibrary argument (patterns 3 & 4)
+                for (Immediate arg : args) {
+                    if (arg instanceof Local) {
+                        String libName = nativeLibraryToLib.get(arg);
+                        if (libName != null) {
+                            info = new RegisterInfo(libName, hasClassParam
+                                    ? API_REGISTER_CLASS_NATIVELIBRARY
+                                    : API_REGISTER_NATIVELIBRARY);
+                            break;
+                        }
                     }
                 }
-            } catch (Exception ex) {
-                System.err.println("[WARN] failed reading jar: " + jar + " :: " + ex.getMessage());
+            }
+
+            if (info == null) {
+                info = new RegisterInfo(UNRESOLVED_LIB, API_UNKNOWN);
+            }
+            // Keep the best info per registered class within this method too.
+            RegisterInfo prev = result.get(registeredClass);
+            if (prev == null || (!prev.isResolved() && info.isResolved())) {
+                result.put(registeredClass, info);
             }
         }
-        return classToJar;
+
+        return result;
+    }
+
+    private static <V> void copyIfPresent(Map<Local, V> map, Local from, Local to) {
+        V v = map.get(from);
+        if (v != null) map.put(to, v);
     }
 
     /**
-     * Converts a list of paths to a classpath string.
-     *
-     * Joins the paths using the system's path separator (: on Unix, ; on Windows).
-     *
-     * @param entries List of paths to join
-     * @return Classpath string
+     * Converts a Jimple class constant value (e.g. "Lcom/foo/Bar;") to an FQCN.
      */
-    private static String toClassPath(List<String> entries) {
-        String sep = System.getProperty("path.separator");
-        return entries.stream().collect(Collectors.joining(sep));
+    private static String classConstantToFqcn(ClassConstant cc) {
+        String v = cc.getValue();
+        if (v.startsWith("L") && v.endsWith(";")) {
+            v = v.substring(1, v.length() - 1);
+        }
+        return v.replace('/', '.');
     }
 
     /**
-     * Extracts the invoke expression from a statement.
+     * If the method always boils down to returning a single constant String
+     * (directly, via a local, or via an already-summarized helper call),
+     * returns that String; otherwise null.
      *
-     * Handles both JInvokeStmt (standalone calls) and JAssignStmt (calls with return values).
-     * Also handles Optional wrapping that may occur in some SootUp versions.
-     *
-     * @param stmt The statement to extract from
-     * @return The invoke expression, or null if not an invoke statement
+     * Note: returns the FIRST resolvable constant return. Methods with
+     * multiple differing return values are summarized by whichever return
+     * appears first in the statement list (a known, accepted imprecision).
      */
-    private static AbstractInvokeExpr getInvoke(Stmt stmt) {
-        if (stmt instanceof JInvokeStmt) {
-            Object ie = ((JInvokeStmt) stmt).getInvokeExpr();
-            if (ie instanceof AbstractInvokeExpr) return (AbstractInvokeExpr) ie;
-            if (ie instanceof Optional) {
-                Object val = ((Optional<?>) ie).orElse(null);
-                return (val instanceof AbstractInvokeExpr) ? (AbstractInvokeExpr) val : null;
-            }
-        } else if (stmt instanceof JAssignStmt) {
-            Value rhs = ((JAssignStmt) stmt).getRightOp();
-            if (rhs instanceof AbstractInvokeExpr) {
-                return (AbstractInvokeExpr) rhs;
+    private String summarizeStringReturn(SootMethod m) {
+        Map<Local, String> localToString = new HashMap<>();
+
+        for (Stmt stmt : m.getBody().getStmts()) {
+            if (stmt instanceof JAssignStmt) {
+                JAssignStmt as = (JAssignStmt) stmt;
+                Value lhs = as.getLeftOp();
+                Value rhs = as.getRightOp();
+
+                if (lhs instanceof Local) {
+                    Local lhsLocal = (Local) lhs;
+                    localToString.remove(lhsLocal);
+                    if (rhs instanceof StringConstant) {
+                        localToString.put(lhsLocal, ((StringConstant) rhs).getValue());
+                    } else if (rhs instanceof Local) {
+                        copyIfPresent(localToString, (Local) rhs, lhsLocal);
+                    } else if (rhs instanceof AbstractInvokeExpr) {
+                        // Propagate summaries of helpers calling helpers
+                        // (resolved across PASS 0 fixed-point iterations).
+                        String s = methodStringReturns.get(
+                                ((AbstractInvokeExpr) rhs).getMethodSignature().toString());
+                        if (s != null) localToString.put(lhsLocal, s);
+                    }
+                }
+            } else if (stmt instanceof JReturnStmt) {
+                Value op = ((JReturnStmt) stmt).getOp();
+                if (op instanceof StringConstant) {
+                    return ((StringConstant) op).getValue();
+                }
+                if (op instanceof Local) {
+                    String s = localToString.get(op);
+                    if (s != null) return s;
+                }
             }
         }
         return null;

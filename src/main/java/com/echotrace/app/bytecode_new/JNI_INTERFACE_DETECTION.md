@@ -140,49 +140,48 @@ So a **`native_methods.txt`** line (or absence of one) for **`java.lang.Thread.y
 
 === Per-version evolution (added vs. dropped) ===
   JDK 8  (rt.jar) -> JDK 11 (java.base.jmod)
-    added (12):
-      + java.lang.invoke.VarHandle.acquireFence
-      + java.lang.invoke.VarHandle.releaseFence
-      + java.lang.invoke.VarHandle.fullFence
-      + jdk.internal.misc.Unsafe.allocateUninitializedArray
-      + jdk.internal.util.string.StringConcatHelper.newArray
-      + jdk.internal.util.string.StringConcatHelper.newString
-      + jdk.internal.misc.ScopedMemoryAccess.getIntOpaqueInternal
-      + jdk.internal.misc.ScopedMemoryAccess.putIntOpaqueInternal
-      + jdk.internal.module.SystemModuleFinder.findModule
-      + java.lang.StrictMath.fma
-      + java.lang.Runtime.version0
-      + jdk.internal.jimage.ImageReader.read
-      
-    dropped (1804):
-      - java.applet.Applet.showStatus
-      - java.applet.Applet.resize
-      - java.applet.Applet.getDocumentBase
-      - java.applet.Applet.getAppletContext
+    added (12) — illustrative `native` entries tied to **JDK 9+ `java.base`** (checked in OpenJDK 17
+      `java.base`; types like `java.lang.Module`, `VarHandle`, and `ProcessHandleImpl` did not exist in JDK 8):
+      + java.lang.Module.defineModule0
+      + java.lang.Module.addReads0
+      + java.lang.Module.addExports0
+      + java.lang.Module.addExportsToAll0
+      + java.lang.Module.addExportsToAllUnnamed0
+      + java.lang.invoke.VarHandle.get                  (signature-polymorphic accessor)
+      + java.lang.invoke.VarHandle.set
+      + java.lang.ProcessHandleImpl.initNative
+      + java.lang.ProcessHandleImpl.getCurrentPid0
+      + java.lang.ProcessHandleImpl.waitForProcessExit0
+      + jdk.internal.loader.NativeLibraries.load
+      + jdk.internal.loader.NativeLibraries.unload
+      ...
+    dropped (1804) — mostly **`rt.jar` outside `java.base`**; **AWT / desktop** natives (still shipped, but under **`java.desktop`**):
       - java.awt.Component.initIDs
-      - java.awt.Canvas.initIDs
-      - java.awt.Toolkit.initHW
-      - java.awt.GraphicsEnvironment.initDisplay
-      - java.sql.DriverManager.getConnection         (driver SPI moved to java.sql jmod)
-      - javax.swing.UIManager.initialize
-      - javax.swing.JComponent.initFocusTraversalKeys
-      - sun.applet.AppletViewer.panel.getToolkit
-      
+      - java.awt.Toolkit.initIDs
+      - java.awt.Font.initIDs
+      - java.awt.Color.initIDs
+      - java.awt.Window.initIDs
+      - java.awt.Container.initIDs
+      - java.awt.Frame.initIDs
+      - java.awt.image.BufferedImage.initIDs
+      - java.awt.event.KeyEvent.initIDs
+      - java.awt.Cursor.initIDs
+      - java.awt.Dialog.initIDs
+      ...
+    (`java.applet.*`, **`javax.swing.*`**, **`java.sql.*`**, … also disappear from a **`java.base`-only**
+     scan because those modules split out; many of those types are **not** `native` at all. Fence helpers
+     like **`VarHandle.acquireFence`** are **Java** in current OpenJDK sources, not **ACC_NATIVE**.)
     (Many drops are **not** “removed from the JDK” — the same packages moved to **java.desktop**,
      **java.sql**, **java.logging**, … and disappear from a **java.base-only** scan.)
   JDK 11 (java.base.jmod) -> JDK 21 (java.base.jmod)
-    added (examples — Vector API / continuations plumbing / continued jdk.internal growth):
-      + jdk.internal.vm.vector.VectorSupport.fromBitsCoerced
-      + jdk.internal.vm.vector.VectorSupport.shuffleToVector
-      + jdk.internal.vm.vector.VectorSupport.unboxVector
-      + java.lang.Thread.wait0
-      + jdk.internal.vm.StackWalker.fetchStackFrames
-      + jdk.internal.vm.Continuation.pin
+    added (examples — **Vector API** and other **`jdk.internal.vm.*`** growth; exact list depends on the two builds):
+      + jdk.internal.vm.vector.VectorSupport.getMaxLaneCount
+      + jdk.internal.vm.vector.VectorSupport.registerNatives
       ...
-    dropped (examples — often includes Loom-related `Thread` public API refactor):
-      - java.lang.Thread.yield
-      - java.lang.Thread.sleep
-      - java.lang.Thread.sleepNanos0
+    dropped (examples — **Project Loom** (JDK 19+) often rewrites **`java.lang.Thread`**: `yield` / `sleep`
+      **lose `ACC_NATIVE` on the public methods** and delegate to new scheduler natives; compare your two `Thread.class` files):
+      - java.lang.Thread.yield                         (often non-`native` **public** bytecode in 21+)
+      - java.lang.Thread.sleep                         (`long` overload; public **Java** façade in 21+)
       ...
     (Exact FQNs vary by vendor tag; use the diff as a sanity signal, not a golden file.)
 ```
@@ -255,4 +254,3 @@ mvn test -Dtest=PrototypeFinalCrossJdkAppAndRuntimeTest
 - **JNI static detection** = **`ACC_NATIVE` in bytecode**, implemented primarily by **`PrototypeFinal`** Mode `--1` using **ASM**, with optional **JDK runtime** classes on the loader via **`--runtime`**.
 - **Tests** prove (1) **coverage across JDK versions** when artifacts exist and (2) **app + JDK pairing** via **`DemoNativeApplication`**.
 - **Downstream**, EchoTrace splits **application** vs **JDK** resolution: **`Java_*` / dynamic JNI** vs **`JVM_*` / libjvm**, and hardens for **JDK evolution** (symbol naming, Loom, new bytecode levels).
-

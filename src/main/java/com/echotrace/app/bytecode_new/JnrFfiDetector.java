@@ -68,8 +68,8 @@ public class JnrFfiDetector {
 
     // Interface FQCN -> set of library names
     private static final Map<String, Set<String>> IFACE_TO_LIBS = new LinkedHashMap<>();
-    // Interface FQCN -> API pattern string
-    private static final Map<String, String> IFACE_TO_API = new HashMap<>();
+    // Interface FQCN -> API pattern strings
+    private static final Map<String, Set<String>> IFACE_TO_APIS = new HashMap<>();
 
     // Field-level taint (for loader proxies stored in static fields)
     // field key -> interface FQCN
@@ -96,17 +96,23 @@ public class JnrFfiDetector {
         File hitsFile    = new File(out, "jnr_ffi_hits.txt");
         File skippedFile = new File(out, "skipped_methods.txt");
 
-        // Collect target jars
+        // Collect target jars. Framework/runtime jars stay on the analysis
+        // classpath, but are not scanned as application targets.
         List<String> targetJars = collectJarPaths(targetDir);
+        List<String> scanTargetJars = targetScanJars(targetJars);
+        Map<String, String> nativeLibraryNames = NativeLibraryNames.fromTargetDir(targetDir);
         System.out.println("[INFO] target jars: " + targetJars.size());
+        System.out.println("[INFO] target jars scanned: " + scanTargetJars.size());
+        System.out.println("[INFO] framework/runtime jars excluded from target scan: "
+                + (targetJars.size() - scanTargetJars.size()));
 
         // Index target classes
-        Map<String, String> classToJar = collectClassNamesFromJars(targetJars);
+        Map<String, String> classToJar = collectClassNamesFromJars(scanTargetJars);
         Set<String> targetClassNames = classToJar.keySet();
         System.out.println("[INFO] target classes indexed: " + targetClassNames.size());
 
-        // Build classpath
-        String cp = toClassPath(targetJars);
+        List<String> analysisJars = analysisClasspathJars(targetJars);
+        String cp = toClassPath(analysisJars);
         System.out.println("[INFO] scanning target classes for jnr-ffi bindings");
         System.out.println("       target=" + targetDir);
         System.out.println("       out   =" + out.getAbsolutePath());
@@ -179,16 +185,69 @@ public class JnrFfiDetector {
             }
 
             // ============================================================
-            // PASS 2: For each discovered interface, enumerate all methods
+            // PASS 2: Prefer actual call sites to loaded jnr-ffi interfaces.
+            // Fall back to full interface enumeration only when an interface is
+            // loaded but no call sites are visible in the analyzed bytecode.
             // ============================================================
-            System.out.println("[PASS 2] Enumerating methods from discovered interfaces...");
+            System.out.println("[PASS 2] Scanning call sites for discovered interfaces...");
 
             long hits = 0;
+            Set<String> seenHitKeys = new LinkedHashSet<>();
+            Set<String> interfacesWithCallsites = new HashSet<>();
+
+            for (SootClass sc : targetClasses) {
+                for (SootMethod m : sc.getMethods()) {
+                    try {
+                        if (!m.hasBody()) continue;
+                        for (Stmt stmt : m.getBody().getStmts()) {
+                            AbstractInvokeExpr inv = getInvoke(stmt);
+                            if (inv == null) continue;
+
+                            MethodSignature sig = inv.getMethodSignature();
+                            String ifaceFqcn = sig.getDeclClassType().getFullyQualifiedName();
+                            Set<String> libs = IFACE_TO_LIBS.get(ifaceFqcn);
+                            if (libs == null) continue;
+
+                            String methodName = sig.getName();
+                            if ("<clinit>".equals(methodName) || "<init>".equals(methodName)) continue;
+
+                            interfacesWithCallsites.add(ifaceFqcn);
+                            String libStr = NativeLibraryNames.resolve(String.join("|", libs), nativeLibraryNames);
+                            String api = apiString(ifaceFqcn);
+                            String jar = classToJar.getOrDefault(ifaceFqcn, "?");
+                            String key = ifaceFqcn + "|" + libStr + "|" + methodName;
+                            if (!seenHitKeys.add(key)) continue;
+
+                            hits++;
+                            hitW.write(ifaceFqcn);
+                            hitW.write(" | ");
+                            hitW.write(libStr);
+                            hitW.write(" | ");
+                            hitW.write(methodName);
+                            hitW.write(" | ");
+                            hitW.write(api);
+                            hitW.write(" | ");
+                            hitW.write(jar);
+                            hitW.write("\n");
+                        }
+                    } catch (LinkageError le) {
+                        skipped++;
+                        writeSkip(skipW, m.getSignature().toString(), le);
+                    } catch (Exception e) {
+                        skipped++;
+                        writeSkip(skipW, m.getSignature().toString(), e);
+                    }
+                }
+            }
+
+            System.out.println("[PASS 2] Callsite hits: " + hits);
+            System.out.println("[PASS 3] Enumerating fallback interfaces with no call sites...");
             for (Map.Entry<String, Set<String>> entry : IFACE_TO_LIBS.entrySet()) {
                 String ifaceFqcn = entry.getKey();
+                if (interfacesWithCallsites.contains(ifaceFqcn)) continue;
                 Set<String> libs = entry.getValue();
-                String libStr = String.join("|", libs);
-                String api = IFACE_TO_API.getOrDefault(ifaceFqcn, API_UNKNOWN);
+                String libStr = NativeLibraryNames.resolve(String.join("|", libs), nativeLibraryNames);
+                String api = apiString(ifaceFqcn);
                 String jar = classToJar.getOrDefault(ifaceFqcn, "?");
 
                 // BFS to enumerate all methods in interface hierarchy
@@ -199,6 +258,8 @@ public class JnrFfiDetector {
                 }
 
                 for (String methodName : methodNames) {
+                    String key = ifaceFqcn + "|" + libStr + "|" + methodName;
+                    if (!seenHitKeys.add(key)) continue;
                     hits++;
                     hitW.write(ifaceFqcn);
                     hitW.write(" | ");
@@ -457,8 +518,14 @@ public class JnrFfiDetector {
             IFACE_TO_LIBS.computeIfAbsent(iface, k -> new LinkedHashSet<>()).addAll(libs);
         }
         if (api != null) {
-            IFACE_TO_API.put(iface, api);
+            IFACE_TO_APIS.computeIfAbsent(iface, k -> new LinkedHashSet<>()).add(api);
         }
+    }
+
+    private static String apiString(String iface) {
+        Set<String> apis = IFACE_TO_APIS.get(iface);
+        if (apis == null || apis.isEmpty()) return API_UNKNOWN;
+        return String.join("|", apis);
     }
 
     /**
@@ -758,6 +825,20 @@ public class JnrFfiDetector {
         return jars;
     }
 
+    private static List<String> targetScanJars(List<String> jars) {
+        return jars.stream()
+                .filter(jar -> !isFrameworkRuntimeJar(jar))
+                .collect(Collectors.toList());
+    }
+
+    private static boolean isFrameworkRuntimeJar(String jarPath) {
+        String name = new File(jarPath).getName().toLowerCase(Locale.ROOT);
+        return name.startsWith("jna-")
+                || name.startsWith("jnr-")
+                || name.startsWith("jffi-")
+                || name.startsWith("hawtjni-runtime-");
+    }
+
     private static Map<String, String> collectClassNamesFromJars(List<String> jarPaths) {
         Map<String, String> classToJar = new HashMap<>();
         for (String jar : jarPaths) {
@@ -782,5 +863,16 @@ public class JnrFfiDetector {
     private static String toClassPath(List<String> entries) {
         String sep = System.getProperty("path.separator");
         return entries.stream().collect(Collectors.joining(sep));
+    }
+
+    private static List<String> analysisClasspathJars(List<String> targetJars) {
+        List<String> jars = new ArrayList<>(targetJars);
+        String runtimeDir = System.getProperty("detector.runtime.dir");
+        if (runtimeDir != null && !runtimeDir.trim().isEmpty()) {
+            List<String> runtimeJars = collectJarPaths(runtimeDir.trim());
+            jars.addAll(runtimeJars);
+            System.out.println("[INFO] detector.runtime.dir jars: " + runtimeJars.size());
+        }
+        return jars;
     }
 }

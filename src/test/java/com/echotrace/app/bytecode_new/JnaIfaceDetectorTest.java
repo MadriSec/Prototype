@@ -91,26 +91,18 @@ class JnaIfaceDetectorTest {
     }
 
     // ---- StdCallLibrary inheritance (MyKernel32 -> StdCallLibrary -> Library) ----
+    // These are now excluded by platform filter (kernel32 = Windows)
 
     @Test
     void testStdCallInheritance_Beep() {
         List<ParsedHit> matching = findHits("WinApp", "Beep");
-        assertFalse(matching.isEmpty(), "Expected hit for WinApp calling Beep via MyKernel32");
-
-        ParsedHit h = matching.get(0);
-        assertEquals("kernel32", h.lib);
-        assertEquals("Beep", h.symbol);
-        assertTrue(h.iface.contains("MyKernel32"), "Interface should be MyKernel32, got: " + h.iface);
+        assertTrue(matching.isEmpty(), "kernel32 hits should be filtered out by platform exclusion");
     }
 
     @Test
     void testStdCallInheritance_GetCurrentProcessId() {
         List<ParsedHit> matching = findHits("WinApp", "GetCurrentProcessId");
-        assertFalse(matching.isEmpty(), "Expected hit for WinApp calling GetCurrentProcessId");
-
-        ParsedHit h = matching.get(0);
-        assertEquals("kernel32", h.lib);
-        assertTrue(h.iface.contains("MyKernel32"));
+        assertTrue(matching.isEmpty(), "kernel32 hits should be filtered out by platform exclusion");
     }
 
     // ---- Edge case #3: Different field name (INSTANCE2) ----
@@ -184,9 +176,9 @@ class JnaIfaceDetectorTest {
 
     @Test
     void testTotalHitCount() {
-        // 3 MyApp + 3 WinApp + 4 EdgeCases = 10
-        assertEquals(10, hits.size(),
-                "Expected 10 total hits (3 MyApp + 3 WinApp + 4 EdgeCases), got: " + hits.size()
+        // 3 MyApp + 0 WinApp (filtered: kernel32) + 4 EdgeCases = 7
+        assertEquals(7, hits.size(),
+                "Expected 7 total hits (3 MyApp + 4 EdgeCases, WinApp excluded by platform filter), got: " + hits.size()
                         + "\nHits:\n" + hits.stream().map(h -> "  " + h.callerSig + " | " + h.lib + " | " + h.symbol)
                         .collect(Collectors.joining("\n")));
     }
