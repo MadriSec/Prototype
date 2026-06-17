@@ -41,7 +41,7 @@ The key design choice is that EchoTrace analyzes the container's own artifacts r
 | Stage | Tool | Input | Output |
 |-------|------|-------|--------|
 | 1. Dynamic capture | Sysdig (eBPF) | Running container | Lists of loaded libraries, JARs, executables |
-| 2. Extraction | `docker cp` | Container filesystem | `LIBS/`, `JARFILES/`, `BINARIES/` directories |
+| 2. Extraction | `docker cp` | Container filesystem | `LIBS_<IMG_SAFE>/`, `JARFILES_<IMG_SAFE>/`, `BINARIES_<IMG_SAFE>/`, `RUNTIME_<IMG_SAFE>/` directories |
 | 3. Bytecode analysis | ASM + SootUp | Application and runtime JARs | Native method and native binding records |
 | 4. Native mapping | Mapper + ELF tools | Native records + `.so` files | Java method -> native symbol -> library |
 | 5. Binary analysis | SysPart VFA | `.so` files + mapper starts; executables + entry/import starts | Syscall summaries per ELF |
@@ -83,7 +83,7 @@ Using both fields avoids missing JVM startup events when name attribution is inc
 
 ```bash
 # Capture a container clean-start run (120s default)
-./sysdig_unified_scoped.sh <container_name_or_id> [duration_seconds]
+./scripts/sysdig_unified.sh <container_name_or_id> [duration_seconds]
 ```
 
 **Outputs** (in `sysdig_outputs_<IMG_SAFE>/`):
@@ -143,7 +143,7 @@ The scanners use ASM and SootUp. Each native interface type has a dedicated dete
 ### Unified Detector
 
 ```bash
-mvn -f pom.xml exec:java \
+mvn -f pom.xml -q clean compile exec:java \
   -Dexec.mainClass=com.echotrace.app.bytecode_new.JNADetector \
   -Dexec.args="<JARFILES_dir> <outputs_dir> <RUNTIME_dir>"
 ```
@@ -228,8 +228,8 @@ library:java.method -> c_symbol [resolution_type]
 
 ### Post-Processing
 
-- `filter.sh` -- removes `NOT_FOUND_IN_LIBS` entries (methods with no library match)
-- `change_format.py` -- groups C symbols by library, producing per-library start-function files for SysPart
+- `scripts/filter.sh` -- removes `NOT_FOUND_IN_LIBS` entries (methods with no library match)
+- `scripts/change_format.py` -- groups C symbols by library, producing per-library start-function files for SysPart
 
 ---
 
@@ -237,13 +237,13 @@ library:java.method -> c_symbol [resolution_type]
 
 ### What SysPart Does
 
-[SysPart](https://arxiv.org/abs/2309.05169) ([CCS ’23](https://doi.org/10.1145/3576915.3623207)) is a research system for **binary-only** syscall surface reduction; at its core it builds **sound (conservative) control- and call-graph views** of x86-64 Linux ELF code and uses **value-flow analysis (VFA)** together with other static techniques to **refine the function-call graph (FCG)**—especially around **indirect calls** and **dynamically resolved targets**—before reasoning about which **syscall** sites are reachable.
+[SysPart](https://arxiv.org/abs/2309.05169) ([CCS ’23](https://doi.org/10.1145/3576915.3623207); [codebase](https://github.com/vidyalakshmir/SysPartCode/tree/optimizations)) is a research system for **binary-only** syscall surface reduction; at its core it builds **sound (conservative) control- and call-graph views** of x86-64 Linux ELF code and uses **value-flow analysis (VFA)** together with other static techniques to **refine the function-call graph (FCG)**—especially around **indirect calls** and **dynamically resolved targets**—before reasoning about which **syscall** sites are reachable.
 
 EchoTrace plugs into SysPart's **static syscall computation** pipeline: we supply **ELF paths** (mirrored `.so` files and extracted executables) and **explicit start functions**. For shared libraries, these starts normally come from the Java-to-native mapper. If bytecode mapping is unavailable, EchoTrace can fall back to exported dynamic symbols. For binaries observed through `execve`, EchoTrace uses `_start` when available and otherwise falls back to imported dynamic functions. SysPart then answers: *starting from those addresses, which syscall instructions can this binary reach?*
 
 ### What SysPart Does Internally (per ELF)
 
-When analysis runs (via **`compute_syscalls.sh`** under your **`SysPartCode/analysis/app`** checkout, as invoked by **`automate_syscall_analysis.sh`**), the workflow is roughly:
+When analysis runs (via **`compute_syscalls.sh`** under your **`SysPartCode/analysis/app`** checkout, as invoked by **`scripts/automate_syscall_analysis.sh`**), the workflow is roughly:
 
 1. **Load & configure the binary.** The target ELF is loaded for analysis; **`USER_LIBRARY_PATH`** points SysPart at EchoTrace’s extracted **`LIBS_*`** tree so dependent shared objects resolve the same way as in the offline mirror.
 
@@ -265,10 +265,10 @@ The published SysPart system also targets **temporal** syscall filtering for ser
 
 ### How We Use It
 
-EchoTrace runs SysPart **once per analyzed ELF**: **`automate_syscall_analysis.sh`** prepares start-function files, sets **`USER_LIBRARY_PATH`** to the extracted library tree, and invokes **`SysPartCode/analysis/app/src/scripts/compute_syscalls.sh`** with the binary path, output directory, and start list. In the normal Java path, start functions come from the native-method mapper; in fallback modes they come from library exports or executable starts/imports.
+EchoTrace runs SysPart **once per analyzed ELF**: **`scripts/automate_syscall_analysis.sh`** prepares start-function files, sets **`USER_LIBRARY_PATH`** to the extracted library tree, and invokes **`SysPartCode/analysis/app/src/scripts/compute_syscalls.sh`** with the binary path, output directory, and start list. In the normal Java path, start functions come from the native-method mapper; in fallback modes they come from library exports or executable starts/imports.
 
 ```bash
-./automate_syscall_analysis.sh \
+./scripts/automate_syscall_analysis.sh \
   --binary-dir LIBS_cassandra/ \
   --startfunc-dir outputs_cassandra/ \
   --output-dir syscalls_output_cassandra/ \
@@ -289,7 +289,7 @@ syscalls_output_cassandra/
 
 ### Analysis Modes
 
-`run_analysis.sh` supports three modes:
+`scripts/run_analysis.sh` supports three modes:
 
 | Mode | Start Functions | Use Case |
 |------|-----------------|----------|
@@ -305,11 +305,11 @@ When symbol information is limited, EchoTrace uses the best start functions avai
 
 Some native targets are resolved through `dlopen()` and `dlsym()` rather than ordinary JNI naming. EchoTrace primarily accounts for these paths through bytecode-level JNA/JNR/JFFI/FFI detection and by analyzing the libraries observed during dynamic capture. The repository also contains helper code for inspecting explicit `dlopen`/`dlsym` behavior:
 
-**Static helpers** (`analysis/app/src/dlanalysis/static/`):
+**Static helpers** (`SysPartCode/analysis/app/src/dlanalysis/static/`):
 - Finds `dlopen()` and `dlsym()` call sites in binaries
 - Recovers string arguments when they are compile-time constants
 
-**Dynamic helpers** (`analysis/app/src/dlanalysis/dynamic/`):
+**Dynamic helpers** (`SysPartCode/analysis/app/src/dlanalysis/dynamic/`):
 - Uses `LD_PRELOAD` function interposition to intercept `dlopen()`/`dlsym()` at runtime
 - Captures actual library paths and symbol names
 
@@ -322,11 +322,18 @@ Some native targets are resolved through `dlopen()` and `dlsym()` rather than or
 
 ### From Syscalls to Seccomp
 
-After all libraries are analyzed by SysPart, the syscall lists are aggregated and converted into a Docker-compatible seccomp profile:
+After all libraries and observed executables are analyzed by SysPart, EchoTrace aggregates their syscall lists and writes a Docker-compatible seccomp profile. In the normal pipeline this is done by `scripts/merge_all_syscalls.py`, which is invoked automatically from `scripts/automate_syscall_analysis.sh`:
 
 ```bash
-python3 generate_seccomp.py \
-  --input syscalls_output_cassandra/ \
+python3 scripts/merge_all_syscalls.py cassandra
+# writes syscalls_output_cassandra/cassandra.txt and syscalls_output_cassandra/cassandra.json
+```
+
+For a standalone syscall text file or directory, `scripts/generate_seccomp.py` can also be used directly:
+
+```bash
+python3 scripts/generate_seccomp.py \
+  --input syscalls_output_cassandra/cassandra.txt \
   --output seccomp_cassandra.json
 ```
 
@@ -349,7 +356,64 @@ Everything not explicitly allowed is denied (`SCMP_ACT_ERRNO`). The generated pr
 ### Using the Profile
 
 ```bash
-docker run --security-opt seccomp=seccomp_cassandra.json cassandra:latest
+docker run --security-opt seccomp=syscalls_output_cassandra/cassandra.json cassandra:latest
+```
+
+
+---
+
+## End-to-End Pipeline
+
+The root entrypoint is `final_tool.sh`. It keeps the top-level workflow small and delegates the implementation to scripts under `scripts/`:
+
+```text
+final_tool.sh
+  -> scripts/sysdig_unified.sh
+  -> scripts/extract_runtime_and_jar_libs.sh
+       -> scripts/extract_container_jdk.py
+       -> scripts/extract_libs_jars.sh
+  -> scripts/run_analysis.sh
+       -> JNADetector / PrototypeFinal
+       -> scripts/prepare_native_mapping.sh
+            -> scripts/mapped_updated.py
+            -> scripts/filter.sh
+            -> scripts/change_format.py
+       -> scripts/automate_syscall_analysis.sh
+            -> SysPartCode/analysis/app/src/scripts/compute_syscalls.sh
+            -> scripts/merge_all_syscalls.py
+```
+
+`final_tool.sh` is interactive: it lists running containers and asks for the target container ID/name. The per-image suffix `IMG_SAFE` is derived from the Docker image name, and all generated artifacts are written to image-scoped directories such as `JARFILES_<IMG_SAFE>/`, `LIBS_<IMG_SAFE>/`, `RUNTIME_<IMG_SAFE>/`, `outputs_<IMG_SAFE>/`, `syscalls_output_<IMG_SAFE>/`, and `syscalls_BIN_<IMG_SAFE>/`.
+
+---
+
+## Project Structure
+
+```text
+final_tool.sh                  # interactive end-to-end entrypoint
+build.sh                       # Maven build + dependency copy
+scripts/                       # dynamic capture, extraction, mapping, SysPart orchestration
+src/main/java/.../bytecode_new # Java bytecode/native-binding detectors
+SysPartCode/                   # SysPart submodule
+runc.txt                       # baseline runtime syscalls merged into generated profiles
+```
+
+The `SysPartCode/` submodule tracks the upstream [SysPartCode optimizations branch](https://github.com/vidyalakshmir/SysPartCode/tree/optimizations).
+
+Generated analysis artifacts are intentionally ignored by Git:
+
+```text
+BINARIES_*/
+JARFILES_*/
+LIBS_*/
+RUNTIME_*/
+outputs_*/
+sysdig_outputs_*/
+syscalls_output_*/
+syscalls_BIN_*/
+syscalls_LIBS_*/
+target/
+outputs
 ```
 
 ---
@@ -359,18 +423,52 @@ docker run --security-opt seccomp=seccomp_cassandra.json cassandra:latest
 
 ### Prerequisites
 
-- Docker CLI + `jq`
-- Java 11+ (for building the agent and running SootUp analysis)
+EchoTrace is intended for a Linux x86-64 host that can run Docker containers and analyze x86-64 ELF binaries. The current SysPart submodule has been tested upstream on Ubuntu 22.04; other recent Linux distributions may work, but package names can differ.
+
+Host tools used by the pipeline:
+
+- Docker CLI and daemon access for `docker ps`, `docker inspect`, `docker exec`, `docker cp`, `docker stop`, and `docker start`
+- Sysdig with modern eBPF support for dynamic capture; the scripts run `sudo sysdig --modern-bpf`
+- Java JDK 11+ with `java` and `javac` on `PATH`
 - Maven 3.6+
 - Python 3.8+
-- Sysdig (with `--modern-bpf` support) for dynamic capture
-- SysPart (in `../SysPartCode/`) for binary analysis
+- Python package: `pyelftools`
+- ELF/native utilities: `binutils` (`nm`, `objdump`, `readelf`), `file`, `ldd`, `unzip`, `make`, `g++`, `gdb`, `libreadline-dev`, `libunwind-dev`, and debug libc/libstdc++ packages for better SysPart results
+- SysPart submodule checked out at `SysPartCode/` for binary analysis ([optimizations branch](https://github.com/vidyalakshmir/SysPartCode/tree/optimizations))
+
+On Ubuntu 22.04, a typical setup is:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  docker.io sysdig openjdk-17-jdk maven python3 python3-pip \
+  binutils file unzip make g++ gdb lsb-release libreadline-dev libunwind-dev \
+  libc6-dbg libstdc++6-12-dbg
+
+python3 -m pip install --user pyelftools
+```
+
+If your host has a different GCC runtime, replace `libstdc++6-12-dbg` with the matching `libstdc++6-<version>-dbg` package.
+
+Clone with submodules, or initialize them after cloning:
+
+```bash
+git submodule update --init --recursive
+```
+
+Build SysPart once before running binary analysis:
+
+```bash
+cd SysPartCode
+./build_upgraded_egalito.sh
+cd ..
+```
 
 ### Build
 
 ```bash
-# Build the main analysis tool
-mvn clean package -DskipTests
+# Build the main analysis tool and copy Maven dependencies
+./build.sh
 ```
 
 ### Run
@@ -379,11 +477,17 @@ mvn clean package -DskipTests
 # Start your target container
 docker run -d --name my-app my-image:latest
 
-# Run the full analysis
-IMG_SAFE=my_app bash final_tool.sh my-app
+# Run the full analysis. The script prompts for the container ID/name.
+./final_tool.sh
 
-# Result: seccomp.json in the project root
-docker run --security-opt seccomp=seccomp.json my-image:latest
+# Result: syscalls_output_<IMG_SAFE>/<IMG_SAFE>.json
+docker run --security-opt seccomp=syscalls_output_my-image_latest/my-image_latest.json my-image:latest
+```
+
+For a non-interactive rerun using already extracted artifacts:
+
+```bash
+IMG_SAFE=my-image_latest SKIP_SYSDIG=1 ./scripts/run_analysis.sh
 ```
 
 ### Tested Applications
