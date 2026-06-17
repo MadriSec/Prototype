@@ -25,6 +25,7 @@ Dynamic Capture -> Bytecode Analysis -> Native Mapping
 - [Project Structure](#project-structure)
 - [Quick Start](#quick-start)
 - [Results](#evaluation-results-snapshot)
+- [License](#license)
 
 ---
 
@@ -541,4 +542,12 @@ The following snapshot summarizes the JDK 8 container results from the current E
 | Solr 8.7.0 | 26 | 9 | 175 | 16 | 1 | 9 | 14 |
 | Groovy 4.0.0 | 31 | 8 | 164 | 16 | 15 | 64 | 8 |
 | JRuby 9.4.2.0 | 35 | 7 | 142 | 20 | 7 | 8 | 6 |
+
+---
+
+## License
+
+EchoTrace is licensed under the GNU General Public License v3.0. See [`LICENSE`](LICENSE).
+
+The `SysPartCode/` submodule is also GPLv3 and tracks the upstream [SysPartCode optimizations branch](https://github.com/vidyalakshmir/SysPartCode/tree/optimizations). Major third-party components are summarized in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
