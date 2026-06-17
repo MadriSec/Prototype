@@ -24,6 +24,7 @@ Dynamic Capture -> Bytecode Analysis -> Native Mapping
 - [End-to-End Pipeline](#end-to-end-pipeline)
 - [Project Structure](#project-structure)
 - [Quick Start](#quick-start)
+- [Results](#evaluation-results-snapshot)
 
 ---
 
@@ -494,22 +495,22 @@ IMG_SAFE=my-image_latest SKIP_SYSDIG=1 ./scripts/run_analysis.sh
 
 ## Evaluation Results Snapshot
 
-The following snapshot summarizes the JDK 8 container results used in our current comparison with SWAT4J. The final syscall allowlist averages **153.8 syscalls** across these ten applications. Compared with the Docker default seccomp policy, which allows approximately **305 syscalls** out of a 360-syscall universe after denying 55, this is about a **49.6% reduction** in the allowed syscall surface.
+The following snapshot summarizes the JDK 8 container results from the current EchoTrace evaluation. The final syscall allowlist averages **153.8 syscalls** across these ten applications. Compared with the Docker default seccomp policy, which allows approximately **305 syscalls** out of a 360-syscall universe after denying 55, this is about a **49.6% reduction** in the allowed syscall surface.
 
 ### Native Method Resolution
 
-| Application | Base OS | JDK | Total natives | EchoTrace resolved | SWAT4J resolved | EchoTrace not found | SWAT4J not found |
-|-------------|---------|-----|---------------|--------------------|-----------------|---------------------|------------------|
-| ZooKeeper 3.4.14 | Debian GNU/Linux 10 Buster | JDK 8 | 234 | 234 | 103 | 0 | 120 |
-| Tomcat 7.0 | Debian GNU/Linux 10 Buster | JDK 8 | 614 | 614 | 432 | 4 | 149 |
-| Cassandra 3.0.29 | Debian GNU/Linux 10 Buster | JDK 8 | 686 | 686 | 464 | 0 | 149 |
-| Jetty 9.4.51 | Debian 10 Buster | JDK 8 | 225 | 225 | 124 | 0 | 98 |
-| Storm 2.4.0 | Debian 11 Bullseye | JDK 8 | 1547 | 1494 | 1193 | 0 | 243 |
-| OrientDB 3.2.19 | Debian 10 Buster | JDK 8 | 519 | 519 | 358 | 0 | 138 |
-| Elasticsearch 7.5.2 | Debian 10 Buster | JDK 8 | 368 | 368 | 223 | 0 | 73 |
-| Solr 8.7.0 | Debian 10 Buster | JDK 8 | 613 | 531 | 444 | 0 | 109 |
-| Groovy 4.0.0 | Debian 10 Buster | JDK 8 | 335 | 335 | 181 | 5 | 140 |
-| JRuby 9.4.2.0 | Ubuntu 20.04.6 LTS | JDK 8 | 448 | 448 | 330 | 0 | 118 |
+| Application | Base OS | JDK | Total natives | EchoTrace resolved | EchoTrace not found |
+|-------------|---------|-----|---------------|--------------------|---------------------|
+| ZooKeeper 3.4.14 | Debian GNU/Linux 10 Buster | JDK 8 | 234 | 234 | 0 |
+| Tomcat 7.0 | Debian GNU/Linux 10 Buster | JDK 8 | 614 | 614 | 4 |
+| Cassandra 3.0.29 | Debian GNU/Linux 10 Buster | JDK 8 | 686 | 686 | 0 |
+| Jetty 9.4.51 | Debian 10 Buster | JDK 8 | 225 | 225 | 0 |
+| Storm 2.4.0 | Debian 11 Bullseye | JDK 8 | 1547 | 1494 | 0 |
+| OrientDB 3.2.19 | Debian 10 Buster | JDK 8 | 519 | 519 | 0 |
+| Elasticsearch 7.5.2 | Debian 10 Buster | JDK 8 | 368 | 368 | 0 |
+| Solr 8.7.0 | Debian 10 Buster | JDK 8 | 613 | 531 | 0 |
+| Groovy 4.0.0 | Debian 10 Buster | JDK 8 | 335 | 335 | 5 |
+| JRuby 9.4.2.0 | Ubuntu 20.04.6 LTS | JDK 8 | 448 | 448 | 0 |
 
 ### EchoTrace Mapping Breakdown
 
@@ -528,16 +529,16 @@ The following snapshot summarizes the JDK 8 container results used in our curren
 
 ### Syscall and Artifact Summary
 
-| Application | Go whitelist | Total syscalls | Docker default denied overlap | Final allowlist | Libs loaded | Binaries loaded | JARs loaded | Libs analyzed |
-|-------------|--------------|----------------|-------------------------------|-----------------|-------------|-----------------|-------------|---------------|
-| ZooKeeper 3.4.14 | 32 | 157 | 7 | 150 | 14 | 11 | 10 | 5 |
-| Tomcat 7.0 | 33 | 145 | 7 | 138 | 22 | 6 | 41 | 8 |
-| Cassandra 3.0.29 | 23 | 183 | 9 | 174 | 45 | 25 | 51 | 13 |
-| Jetty 9.4.51 | 33 | 155 | 10 | 145 | 18 | 6 | 36 | 4 |
-| Storm 2.4.0 | 25 | 181 | 9 | 172 | 19 | 14 | 84 | 9 |
-| OrientDB 3.2.19 | 32 | 142 | 7 | 135 | 24 | 6 | 76 | 10 |
-| Elasticsearch 7.5.2 | 32 | 150 | 7 | 143 | 23 | 9 | 157 | 9 |
-| Solr 8.7.0 | 26 | 184 | 9 | 175 | 16 | 1 | 9 | 14 |
-| Groovy 4.0.0 | 31 | 172 | 8 | 164 | 16 | 15 | 64 | 8 |
-| JRuby 9.4.2.0 | 35 | 149 | 7 | 142 | 20 | 7 | 8 | 6 |
+| Application | Go whitelist | Docker default denied overlap | Final allowlist | Libs loaded | Binaries loaded | JARs loaded | Libs analyzed |
+|-------------|--------------|-------------------------------|-----------------|-------------|-----------------|-------------|---------------|
+| ZooKeeper 3.4.14 | 32 | 7 | 150 | 14 | 11 | 10 | 5 |
+| Tomcat 7.0 | 33 | 7 | 138 | 22 | 6 | 41 | 8 |
+| Cassandra 3.0.29 | 23 | 9 | 174 | 45 | 25 | 51 | 13 |
+| Jetty 9.4.51 | 33 | 10 | 145 | 18 | 6 | 36 | 4 |
+| Storm 2.4.0 | 25 | 9 | 172 | 19 | 14 | 84 | 9 |
+| OrientDB 3.2.19 | 32 | 7 | 135 | 24 | 6 | 76 | 10 |
+| Elasticsearch 7.5.2 | 32 | 7 | 143 | 23 | 9 | 157 | 9 |
+| Solr 8.7.0 | 26 | 9 | 175 | 16 | 1 | 9 | 14 |
+| Groovy 4.0.0 | 31 | 8 | 164 | 16 | 15 | 64 | 8 |
+| JRuby 9.4.2.0 | 35 | 7 | 142 | 20 | 7 | 8 | 6 |
 
