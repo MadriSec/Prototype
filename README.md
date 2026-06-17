@@ -490,26 +490,6 @@ For a non-interactive rerun using already extracted artifacts:
 IMG_SAFE=my-image_latest SKIP_SYSDIG=1 ./scripts/run_analysis.sh
 ```
 
-### Tested Applications
-
-EchoTrace has been tested against:
-
-| Application | JDK | Native Interfaces Used |
-|-------------|-----|----------------------|
-| Apache Cassandra 3.0, 5.0 | JDK 11, 17 | JNI, JNA (interface + dynamic) |
-| Apache Tomcat 7, 9, 11 | JDK 8-25 | JNI (Tomcat Native / tcnative) |
-| Apache Solr 8.7 | JDK 11 | JNI |
-| Apache Storm 2.8 | JDK 11 | JNI |
-| Apache ZooKeeper 3.4, 3.8 | JDK 8, 11 | JNI |
-| Elasticsearch 7.17 | JDK 17 | JNA (interface) |
-| SonarQube | JDK 17 | JNI |
-| Groovy 5.0 | JDK 25 | JNA (interface + dynamic), jnr-ffi |
-| JRuby 9.4 | JDK 11 | jnr-ffi |
-| Apache Spark 4.1 | JDK 21 | JNI |
-| OrientDB 3.2 | JDK 11 | JNI |
-| JBoss/WildFly | JDK 11 | JNI |
-| Jetty 9.4 | JDK 8 | JNI |
-
 ---
 
 ## Evaluation Results Snapshot
