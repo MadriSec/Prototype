@@ -1,17 +1,12 @@
 # EchoTrace
 
-**Static and dynamic analysis framework for generating minimal seccomp profiles for containerized Java applications.**
+**Static and dynamic analysis framework for generating container-specific seccomp allowlists for Java applications.**
 
-EchoTrace traces the path from Java bytecode through native method declarations, across JNI/JNA/FFI boundaries, into native shared libraries, and down to Linux system calls. The result is a seccomp profile that allows only the syscalls the application actually needs -- nothing more.
+EchoTrace analyzes how a Java container reaches native code and, from there, Linux system calls. It combines runtime observation of the container with static analysis of Java bytecode and native ELF binaries. The output is a JSON syscall allowlist that can be used as the basis for a Docker seccomp profile.
 
 ```
- Java Bytecode     Native Methods     Shared Libraries     System Calls     Seccomp Profile
- ┌───────────┐    ┌──────────────┐    ┌──────────────┐    ┌────────────┐    ┌──────────────┐
- │ app.jar   │───>│ JNI / JNA /  │───>│ libjvm.so    │───>│ read       │───>│ seccomp.json │
- │ dep.jar   │    │ FFI / jnr    │    │ libjava.so   │    │ write      │    │ (allowlist)  │
- │ rt.jar    │    │              │    │ libnet.so    │    │ mmap       │    │              │
- └───────────┘    └──────────────┘    └──────────────┘    │ socket     │    └──────────────┘
-                                                          └────────────┘
+Dynamic Capture -> Bytecode Analysis -> Native Mapping
+-> Syscall Reachability -> JSON Allowlist
 ```
 
 ---
@@ -34,65 +29,23 @@ EchoTrace traces the path from Java bytecode through native method declarations,
 
 ## Architecture Overview
 
-EchoTrace combines **dynamic observation** (kernel telemetry via eBPF), **static Java analysis** (which native surfaces exist and where they live in ELF), and **binary value-flow analysis** (which syscalls native code can reach). Together these produce a minimal **seccomp** allowlist.
+EchoTrace has four stages:
 
-Architecturally there are **three pillars**, then policy synthesis:
+1. **Dynamic capture:** observe the running container and identify the JARs, native libraries, and binaries it uses.
+2. **Bytecode analysis:** scan application and container-JDK runtime JARs for Java methods and APIs that can enter native code.
+3. **Native mapping:** map Java native methods and binding sites to concrete native symbols in container-extracted `.so` files.
+4. **Syscall reachability:** run SysPart from the recovered native start functions and merge reachable syscalls into a JSON allowlist.
 
-### 1. Dynamic analysis (eBPF)
-
-**Goal:** Learn which artifacts the workload *actually* touches — JARs, `.so` libraries, and executables — without guessing from the image filesystem.
-
-**How:** [Sysdig](https://github.com/draios/sysdig) runs on the host with the **modern eBPF** backend. It records **kernel-visible activity** from processes in the target container (`container.name=…`): syscall-backed **file operations** (`open` / `openat`, **`mmap`** / **`mmap2`**, `read` / `pread`) expose paths to loaded **JARs** and **shared libraries**; **`execve`** exposes **binaries** that were executed. Events are filtered for failures and deduplicated into path lists for libraries, jars, and binaries. **`mmap`**-backed evidence is treated as strongest proof a file was really loaded.
-
-**Extraction:** Those paths drive **targeted extraction** from the container filesystem (**`docker cp`**) into an offline workspace (**`JARFILES_*`**, **`LIBS_*`**, **`BINARIES_*`**) for later static phases.
-
-So: **eBPF-backed tracing gives syscall-level visibility → path lists → selective filesystem extraction**, not seccomp syscall enumeration yet.
-
-### 2. Bytecode analysis and mapping to libraries
-
-**Goal:** Enumerate **native methods** (every way Java can call native code) and attach each one to a **concrete `.so`** and **C entry symbol** for downstream binary analysis.
-
-**How — native-method extraction:** Offline JARs are analyzed with **SootUp / ASM** (`PrototypeFinal`, `FinalPrototype`). Dedicated detectors recover native boundaries per mechanism:
-
-| Mechanism | Role of detectors |
-|-----------|-------------------|
-| JNI (static `native`) | Bytecode scan for `ACC_NATIVE`; **`JNIDyn`** inspects ELF for **`JNI_OnLoad` / `RegisterNatives`** |
-| JNA | **`JnaIfaceDetector`**, **`JnaDynDetector`**, **`JnaDirectMapDetector`** |
-| Panama FFI | **`FfiDetector`** (taint `libraryLookup` → `find` → `downcallHandle`) |
-| jnr-ffi | **`JnrFfiDetector`** |
-
-Output centers on a **native-method list** (plus optional detector-specific side outputs).
-
-**How — mapping to the right library:** The **mapper** joins that list with ELF mirrors under **`LIBS_*`**: dynamic symbols (**`nm -D`**) match **`Java_*`** mangling (and vendor prefixes); **`ldd`** resolves transitive **`*.so`** dependencies when the defining library is not obvious; optional **`JVM_SRC`** parses OpenJDK **`JNINativeMethod`** tables for **`RegisterNatives`** registrations that do not follow **`Java_*`** names. **Filtering and formatting** refine output and emit **per-library start symbols** for SysPart.
-
-Optional adjuncts under **`analysis/app/src/dlanalysis/`** improve **`dlopen`** / **`RegisterNatives`** coverage using the same mirrors.
-
-### 3. Binary analysis (SysPart)
-
-**Goal:** From each relevant **ELF artifact** (shared libraries **and** extracted executables), compute which **Linux syscalls** are **reachable** by static analysis.
-
-**How:** An **analysis driver** runs **[SysPart](https://arxiv.org/abs/2309.05169)** **value-flow analysis (VFA)** on mirrored ELF under **`LIBS_*`** and **`BINARIES_*`**. **Start symbols** seed the call graph:
-
-- **Shared libraries (`.so`):** starts come from the **bytecode mapper** (resolved JNI / native entry symbols), or—when that path is unavailable—from **all exported dynamic symbols** on the library (`nm -D` style).
-- **Extracted binaries (executables):** starts come from their **exported symbol table** (dynamic exports suitable as entry surfaces), complementing pure **process entry** views (`_start` / `main`) where those modes are used.
-
-SysPart walks reachable code from those starts and collects **`syscall`** sites. Results are aggregated **per ELF** for the seccomp merge step.
-
-### Policy synthesis
-
-A **profile generator** merges syscall sets from every analyzed ELF (libraries **and** binaries) into **`seccomp.json`** (default deny, explicit allow). **`docker run --security-opt seccomp=…`** applies that profile back at runtime.
-
----
-
+The key design choice is that EchoTrace analyzes the container's own artifacts rather than the host environment. Java native methods and their implementations differ across JDK versions and distributions, so using the host JDK can produce incorrect mappings.
 
 | Stage | Tool | Input | Output |
 |-------|------|-------|--------|
 | 1. Dynamic capture | Sysdig (eBPF) | Running container | Lists of loaded libraries, JARs, executables |
 | 2. Extraction | `docker cp` | Container filesystem | `LIBS/`, `JARFILES/`, `BINARIES/` directories |
-| 3. Bytecode analysis | SootUp + ASM | JAR files | Native method list (fully-qualified) |
-| 4. Library mapping | Mapper (`nm`, `ldd`, optional JDK sources) | Native methods + `.so` files | Mapped methods → symbols → libraries |
-| 5. Binary analysis | SysPart VFA | `.so` files + mapper starts; executables + **exported symbols** as starts | Syscall summaries per ELF (library or binary) |
-| 6. Profile generation | Seccomp profile generator | Aggregated syscalls | `seccomp.json` |
+| 3. Bytecode analysis | ASM + SootUp | Application and runtime JARs | Native method and native binding records |
+| 4. Native mapping | Mapper + ELF tools | Native records + `.so` files | Java method -> native symbol -> library |
+| 5. Binary analysis | SysPart VFA | `.so` files + mapper starts; executables + entry/import starts | Syscall summaries per ELF |
+| 6. Profile generation | Seccomp profile generator | Aggregated syscalls | JSON allowlist |
 
 ---
 
@@ -102,75 +55,60 @@ A **profile generator** merges syscall sets from every analyzed ELF (libraries *
 <img width="960" height="540" alt="sysdig" src="https://github.com/user-attachments/assets/8dec74d9-0557-4efd-810e-a07d03d61e94" />
 
 
-EchoTrace uses [Sysdig](https://github.com/draios/sysdig) with the modern eBPF driver (`--modern-bpf`) for low-overhead kernel-level tracing of running containers. Three categories of events are captured:
+EchoTrace uses [Sysdig](https://github.com/draios/sysdig) with the modern eBPF backend (`--modern-bpf`) to observe container activity without modifying the application. The unified capture is a clean-start run:
 
-**File load events** -- which libraries, JARs, and files the JVM actually opens and maps into memory:
 ```
-open, openat, openat2    File descriptor operations
-mmap, mmap2              Memory-mapped I/O (confirms actual loading)
-read, pread              Active data access
+stop container -> start Sysdig -> wait for probes -> start container
 ```
 
-**Process execution events** -- which binaries the container runs:
+This ordering captures JVM startup, where most JARs, runtime modules, and native libraries are loaded.
+
+The unified capture monitors:
+
 ```
-execve                   Binary execution (entrypoints, shell scripts, utilities)
+open, openat, openat2  -> JAR files and native libraries opened by the JVM
+mmap                   -> mapped artifacts, included for completeness
+execve                 -> native binaries launched inside the container
 ```
 
-**Container-scoped filtering** ensures only events from the target container are captured, filtering out host noise:
-```bash
-container.name=<name> and evt.failed=false
+Events are scoped to the target container using Docker metadata resolved through `docker inspect`:
+
+```
+container.name = <name> OR container.id = <container-id>
 ```
 
-### Accuracy Tiers
-
-Not all file opens mean the file is loaded. Sysdig events are ranked by confidence:
-
-| Evidence | Confidence | Meaning |
-|----------|------------|---------|
-| `mmap` event | Definitive | File is in the process address space |
-| `read`/`pread` event | Probable | Data is being accessed |
-| `open`/`openat` event | Possible | File was checked or stat'd |
+Using both fields avoids missing JVM startup events when name attribution is incomplete.
 
 ### Running a Capture
 
 ```bash
-# Capture for a running container (120s default)
-./sysdig_unified.sh <container_name_or_id> [duration_seconds]
+# Capture a container clean-start run (120s default)
+./sysdig_unified_scoped.sh <container_name_or_id> [duration_seconds]
 ```
 
 **Outputs** (in `sysdig_outputs_<IMG_SAFE>/`):
-- `libs_unique.txt` -- deduplicated `.so` file paths
-- `jars_unique.txt` -- deduplicated `.jar` file paths
-- `bins_unique.txt` -- deduplicated executable paths
-- `libs_by_pid.txt` -- PID-to-library attribution
+
+- `jni_libs_opened.txt` -- deduplicated `.so` file paths
+- `jars_unique_<IMG_SAFE>.txt` -- deduplicated `.jar` file paths
+- `binaries_unique_<IMG_SAFE>.txt` -- deduplicated executable paths
+- `libs_by_pid.txt` -- PID/process/library attribution
+
+`mmap` is monitored for completeness, but in the final evaluation captures the observed `.so` artifacts were discovered through `open`/`openat` events.
 
 ---
 
 ## Container Artifact Extraction
 
-### How We Extract
+Once Sysdig identifies which files the container uses, EchoTrace extracts those paths from the container filesystem for offline analysis:
 
-Once sysdig identifies which files a container loads, we extract them for offline analysis:
-
-
-
-This orchestrates:
-
-1. **JAR extraction** -- all JAR files loaded by the JVM
-2. **Library extraction** -- all `.so` files (JVM libraries, application native libs, system libs)
-3. **Binary extraction** -- executables run by the container
-4. **Debug symbol extraction** -- optional, for more precise binary analysis
-
-**Output directory structure:**
 ```
-outputs_<container>/
-  JARFILES/                 # Application and dependency JARs
-  LIBS/                     # Native shared libraries (.so files)
-  BINARIES/                 # Container executables
-  DEBUG_SYMBOLS/            # Debug info (build-id indexed)
-    .build-id/
-    usr/lib/debug/
+JARFILES_<image>/    # Application and dependency JARs
+LIBS_<image>/        # Native shared libraries (.so files)
+BINARIES_<image>/    # Executed native binaries
+RUNTIME_<image>/     # Runtime JARs/modules from the container JDK
 ```
+
+The runtime extraction is important: EchoTrace analyzes the JDK that actually runs inside the container, not the host JDK.
 
 ---
 
@@ -178,92 +116,78 @@ outputs_<container>/
 
 ### The Problem
 
-Java applications call native code, but the `native` keyword in Java doesn't tell you *which* C function will run or in *which* library. There are multiple ways Java can cross into native code, and each requires different detection strategies.
+Dynamic capture tells EchoTrace what files were loaded; bytecode analysis tells it which Java code can enter native code. Java applications may cross into native code through ordinary JNI declarations, dynamically registered JNI methods, JNA, JNR/JFFI, or FFI/FFM APIs.
 
 ### How We Find Them
 
-EchoTrace uses [SootUp](https://soot-oss.github.io/SootUp/) (the successor to Soot) to analyze Java bytecode. SootUp converts `.class` files to Jimple, a typed three-address intermediate representation, enabling interprocedural flow analysis.
+EchoTrace analyzes:
 
-Each native interface type has a dedicated detector:
+```
+Application JARs observed during dynamic capture
+Runtime JARs/modules extracted from the container JDK
+```
 
-| Type | Detector | Detection Strategy |
+The scanners use ASM and SootUp. Each native interface type has a dedicated detector:
+
+| Type | Detector | Detection strategy |
 |------|----------|-------------------|
-| JNI Static | `PrototypeFinal` | Scan for `ACC_NATIVE` modifier in bytecode |
-| JNI Dynamic | `JNIDyn` | Parse ELF `.so` for `JNI_OnLoad` + `RegisterNatives` |
-| JNA Interface | `JnaIfaceDetector` | BFS on `Library` interface hierarchy + taint `Native.load()` |
-| JNA Dynamic | `JnaDynDetector` | Taint `NativeLibrary.getInstance()` → `getFunction()` → `invoke()` |
-| JNA Direct | `JnaDirectMapDetector` | Find `Native.register()` in `<clinit>`, enumerate `native` methods |
-| Panama FFI | `FfiDetector` | Taint `SymbolLookup.libraryLookup()` → `find()` → `downcallHandle()` |
-| jnr-ffi | `JnrFfiDetector` | Find `LibraryLoader.create().library().load()`, enumerate interface methods |
+| JNI native declarations | `PrototypeFinal` | Scan for `ACC_NATIVE` methods |
+| JNA Interface | `JnaIfaceDetector` | Find interfaces extending `com.sun.jna.Library` |
+| JNA Dynamic | `JnaDynDetector` | Track `NativeLibrary.getInstance()` -> `getFunction()` -> `invoke()` |
+| JNA Direct | `JnaDirectMapDetector` | Find `Native.register()` and enumerate native methods |
+| FFI/FFM | `FfiDetector` | Track `SymbolLookup` -> `find()` -> `downcallHandle()` |
+| JNR/JFFI | `JnrFfiDetector` | Find JNR/JFFI library-loader and interface patterns |
 
 > For detailed documentation of each detector (Java patterns, output formats, limitations), see [`src/main/java/com/echotrace/app/bytecode_new/README.md`](src/main/java/com/echotrace/app/bytecode_new/README.md)
 
-### Analysis Modes
-
-Two entry-point strategies are available:
-
-| Mode | Entry Point | What It Finds |
-|------|-------------|---------------|
-| **PrototypeFinal** | All classes | Every `native` method declaration in the classpath |
-| **FinalPrototype** | `main()` methods | Only native methods reachable from application entry points (via call graph) |
+### Unified Detector
 
 ```bash
-# Mode 1: All native methods (over-approximate, sound)
-java -cp "target/echotrace-1.0-SNAPSHOT.jar:target/deps/*" \
-  com.echotrace.app.bytecode_new.PrototypeFinal \
-  <jar_dir> <jar_dir> --1
-
-# Mode 2: Reachability-filtered (start from main)
-java -cp "target/echotrace-1.0-SNAPSHOT.jar:target/deps/*" \
-  com.echotrace.app.bytecode_new.FinalPrototype \
-  <jar_dir> <jar_dir> --1
+mvn -f pom.xml exec:java \
+  -Dexec.mainClass=com.echotrace.app.bytecode_new.JNADetector \
+  -Dexec.args="<JARFILES_dir> <outputs_dir> <RUNTIME_dir>"
 ```
 
-**Output:** `native_methods.txt` -- one fully-qualified method per line:
-```
-java.lang.System.currentTimeMillis
-java.io.FileInputStream.readBytes
-com.sun.jna.Native.open
-org.apache.tomcat.jni.SSL.newSSLCtx
-```
+Important outputs:
+
+- `native_methods.txt` -- Java native method declarations
+- `jna_hits.txt` -- merged JNA/JNR/FFI native binding hits
+- `ffi_all_hits.txt` -- FFI/JNR-family hits
+- `analyzed_jars.txt` -- application and runtime archives scanned by the detector
 
 ---
 
 
 ## Mapping Native Methods to Libraries
 
-After finding native methods, EchoTrace must determine *which native library* implements each method and *which C function* it maps to.
+After bytecode analysis, EchoTrace maps Java native methods and binding sites to native functions in the `.so` files extracted from the same container.
 
 ### How Mapping Works
 
-`mapper.py` (and its updated version `mapped_updated.py`) combines three sources of truth:
+`mapped_updated.py` combines several sources of evidence.
 
-**1. ELF symbol table scanning (`nm -D`)**
+**1. Standard JNI symbol matching**
 
-Every `.so` file's dynamic symbol table is scanned for exported symbols. Standard JNI symbols follow the `Java_<package>_<Class>_<method>` naming convention:
-```
-Java_java_lang_System_nanoTime → java.lang.System.nanoTime
-Java_java_io_FileInputStream_readBytes → java.io.FileInputStream.readBytes
-```
+EchoTrace scans container-extracted `.so` files for exported JNI symbols:
 
-Library-specific conventions are also handled (e.g., Netty's `netty_*` prefix, Apache Tomcat Native's `tcn_*` prefix).
-
-**2. OpenJDK source mapping (optional, via `JVM_SRC`)**
-
-Many JDK native methods use `RegisterNatives()` at JVM startup, meaning the mapping from Java method to C function doesn't follow the `Java_*` convention. For example:
-```
-java.lang.System.nanoTime → JVM_NanoTime (in libjvm.so)
-java.lang.Thread.start0  → JVM_StartThread (in libjvm.so)
+```text
+Java_<package>_<class>_<method>
 ```
 
-When `JVM_SRC` points to an OpenJDK source tree, the mapper parses `JNINativeMethod` registration tables from C source files to learn these mappings.
+It also handles overloaded JNI names and common JNI mangling variants such as `_1`.
 
-**3. Registered Native Mappign **
+**2. RegisterNatives binary extraction**
 
-Echotrace also resolves JNI methods that are registered dynamically through RegisterNatives, rather than exported with standard Java_* JNI names. For these cases, SysJava analyzes the native libraries extracted from the container, such as libjvm.so, libjava.so, Netty native libraries, and JFFI libraries, and recovers JNINativeMethod tables directly from the binaries. Each recovered table maps a Java method name and descriptor to a native function pointer; SysJava resolves that pointer to a concrete native symbol and library using ELF metadata and symbol tables. This lets SysJava handle JDK- and library-specific native bindings without relying on host JDK source code or hardcoded JDK-version assumptions.
+Many native methods are not exported as `Java_*` symbols. They are registered at runtime through `RegisterNatives`. EchoTrace recovers these mappings directly from the container's native binaries, including libraries such as:
 
+```text
+libjvm.so
+libjava.so
+libnetty*.so
+libjffi*.so
+```
 
-For example, a JDK method may be registered like this:
+For example, a native table may contain:
 
 ```c
 static JNINativeMethod methods[] = {
@@ -271,22 +195,36 @@ static JNINativeMethod methods[] = {
 };
 ```
 
-SysJava recovers this mapping as:
+EchoTrace recovers:
 
 ```text
 java.lang.Thread.start0()V -> JVM_StartThread -> libjvm.so
 ```
 
-This allows SysJava to resolve dynamically registered JNI methods from the container’s actual JDK and native libraries, instead of relying on host JDK source code or hardcoded JDK-version assumptions.
+This binary-level recovery is preferred over source-code assumptions. OpenJDK source scanning through `JVM_SRC` is only a fallback when binary extraction is unavailable.
+
+**3. JNA, JNR/JFFI, and FFI mappings**
+
+EchoTrace also resolves non-JNI native binding mechanisms:
+
+- JNA direct mappings map Java native method names to C symbols in the registered library.
+- JNA interface mappings treat interface methods as native symbols.
+- JNA dynamic mappings recover library and function names from dynamic lookup patterns.
+- JNR/JFFI and FFI/FFM mappings identify bridge-based native calls and downcall targets.
 
 **Output:** `mapped_method_syscalls.txt`
-```
-libjvm.so:java.lang.System.currentTimeMillis -> JVM_CurrentTimeMillis [JVM_REGISTERED]
+
+```text
+libjvm.so:java.lang.Thread.start0 -> JVM_StartThread [JVM_REGISTERED]
 libjava.so:java.io.FileInputStream.readBytes -> Java_java_io_FileInputStream_readBytes [JNI]
-libtcnative-2.so:org.apache.tomcat.jni.SSL.newSSLCtx -> Java_org_apache_tomcat_jni_SSL_newSSLCtx [JNI]
+libc.so.6:org.example.Native.getpid -> getpid [JNA]
 ```
 
-Each line gives: `library:java.method -> c_symbol [resolution_type]`
+Each line gives:
+
+```text
+library:java.method -> c_symbol [resolution_type]
+```
 
 ### Post-Processing
 
@@ -301,7 +239,7 @@ Each line gives: `library:java.method -> c_symbol [resolution_type]`
 
 [SysPart](https://arxiv.org/abs/2309.05169) ([CCS ’23](https://doi.org/10.1145/3576915.3623207)) is a research system for **binary-only** syscall surface reduction; at its core it builds **sound (conservative) control- and call-graph views** of x86-64 Linux ELF code and uses **value-flow analysis (VFA)** together with other static techniques to **refine the function-call graph (FCG)**—especially around **indirect calls** and **dynamically resolved targets**—before reasoning about which **syscall** sites are reachable.
 
-EchoTrace plugs into SysPart’s **static syscall computation** pipeline: we supply **ELF paths** (mirrored `.so` files and extracted executables) and **explicit start symbols** (from bytecode mapping, exported symbols, or entrypoints). SysPart then answers: *starting from those addresses, which syscall instructions can this binary reach?*
+EchoTrace plugs into SysPart's **static syscall computation** pipeline: we supply **ELF paths** (mirrored `.so` files and extracted executables) and **explicit start functions**. For shared libraries, these starts normally come from the Java-to-native mapper. If bytecode mapping is unavailable, EchoTrace can fall back to exported dynamic symbols. For binaries observed through `execve`, EchoTrace uses `_start` when available and otherwise falls back to imported dynamic functions. SysPart then answers: *starting from those addresses, which syscall instructions can this binary reach?*
 
 ### What SysPart Does Internally (per ELF)
 
@@ -319,15 +257,15 @@ When analysis runs (via **`compute_syscalls.sh`** under your **`SysPartCode/anal
 
 6. **Emit diagnostics.** **`callgraph.json`** captures the explored call structure; **`allfunctions.txt`** lists reachable symbols encountered during the walk; **`logfile.txt`** captures warnings (unresolved jumps, missing symbols, etc.).
 
-This is **static** analysis: it does not require running the container during SysPart itself. Precision is bounded by reverse-engineering realities (opaque indirect jumps, hand-written asm, unusual loaders); EchoTrace optionally pulls **debug symbols** and alternate start-function modes (see below) to keep that gap smaller.
+This is **static** analysis: it does not require running the container during SysPart itself. Precision is bounded by reverse-engineering realities such as opaque indirect jumps, hand-written assembly, stripped symbols, and unusual loaders. EchoTrace keeps the analysis container-specific by analyzing the exact libraries and binaries extracted from the image.
 
 ### EchoTrace vs the Full SysPart Paper
 
-The published SysPart system also targets **temporal** syscall filtering for servers (initialization vs serving phases), combines analysis passes built on **Egalito**, and may use **dynamic** observations where static resolution of **`dlopen` / `dlsym`** is incomplete. EchoTrace’s integration focuses on the **same static backbone**—CFG/FCG construction with **VFA-informed** reachability— but drives it with **EchoTrace-derived entrypoints** and merges results into a **single Docker seccomp profile** over libraries *and* helper binaries. Treat the paper as the authoritative reference for algorithmic detail; treat this repo’s scripts as the **wiring** from Java bytecode → ELF mirrors → **`syscalls.txt`** → **`seccomp.json`**.
+The published SysPart system also targets **temporal** syscall filtering for servers (initialization vs serving phases), combines analysis passes built on **Egalito**, and may use **dynamic** observations where static resolution of **`dlopen` / `dlsym`** is incomplete. EchoTrace's integration focuses on the **same static backbone**--CFG/FCG construction with **VFA-informed** reachability--but drives it with **EchoTrace-derived start functions** and merges results into a **single Docker seccomp profile** over libraries *and* helper binaries. Treat the paper as the authoritative reference for algorithmic detail; treat this repo's scripts as the **wiring** from Java bytecode -> ELF mirrors -> **`syscalls.txt`** -> **`seccomp.json`**.
 
 ### How We Use It
 
-EchoTrace runs SysPart **once per analyzed ELF**: **`automate_syscall_analysis.sh`** prepares start-function files (from the bytecode mapper, **`nm -D`** exports, or binary entrypoints depending on mode), sets **`USER_LIBRARY_PATH`** to the extracted library tree, and invokes **`SysPartCode/analysis/app/src/scripts/compute_syscalls.sh`** with the binary path, output directory, and start list.
+EchoTrace runs SysPart **once per analyzed ELF**: **`automate_syscall_analysis.sh`** prepares start-function files, sets **`USER_LIBRARY_PATH`** to the extracted library tree, and invokes **`SysPartCode/analysis/app/src/scripts/compute_syscalls.sh`** with the binary path, output directory, and start list. In the normal Java path, start functions come from the native-method mapper; in fallback modes they come from library exports or executable starts/imports.
 
 ```bash
 ./automate_syscall_analysis.sh \
@@ -355,31 +293,28 @@ syscalls_output_cassandra/
 
 | Mode | Start Functions | Use Case |
 |------|-----------------|----------|
-| `FULL_BYTECODE` | C symbols from mapper.py | Standard: bytecode analysis -> mapper -> SysPart |
-| `LIBRARY_SYMBOLS` | All exported symbols from `nm -D` | When bytecode analysis is unavailable |
-| `BINARY_ONLY` | Entry points (`_start`, `main`) of executables | For non-Java binaries in the container |
+| `FULL_BYTECODE` | C symbols from the native-method mapper | Standard: bytecode analysis -> mapper -> SysPart |
+| `LIBRARY_SYMBOLS` | Exported dynamic symbols from `nm -D` | Library fallback when Java mapping is unavailable |
+| `BINARY_ONLY` | `_start` when available; otherwise imported `UND` functions from `objdump -T` | Native binaries observed through `execve` |
 
 ### Handling Stripped Binaries
 
-When libraries are stripped (no debug symbols), SysPart uses:
-- Entry point addresses from the ELF header (`readelf -h`)
-- Dynamic symbol exports (`nm -D --defined-only`)
-- Optional debug symbols (extracted via `extract_debug_symbols.sh`)
+When symbol information is limited, EchoTrace uses the best start functions available for the artifact type. For libraries, the preferred source is still the Java-to-native mapping; exported dynamic symbols are a fallback mode. For executed binaries, EchoTrace uses `_start` if it can resolve it and otherwise falls back to imported dynamic functions. Optional debug-symbol extraction can improve names and coverage when separate debug packages are available.
 
 ### dlopen/dlsym Analysis
 
-Some libraries are loaded dynamically via `dlopen()` rather than being linked at build time. EchoTrace handles this through:
+Some native targets are resolved through `dlopen()` and `dlsym()` rather than ordinary JNI naming. EchoTrace primarily accounts for these paths through bytecode-level JNA/JNR/JFFI/FFI detection and by analyzing the libraries observed during dynamic capture. The repository also contains helper code for inspecting explicit `dlopen`/`dlsym` behavior:
 
-**Static analysis** (`analysis/app/src/dlanalysis/static/`):
+**Static helpers** (`analysis/app/src/dlanalysis/static/`):
 - Finds `dlopen()` and `dlsym()` call sites in binaries
 - Recovers string arguments when they are compile-time constants
 
-**Dynamic analysis** (`analysis/app/src/dlanalysis/dynamic/`):
+**Dynamic helpers** (`analysis/app/src/dlanalysis/dynamic/`):
 - Uses `LD_PRELOAD` function interposition to intercept `dlopen()`/`dlsym()` at runtime
 - Captures actual library paths and symbol names
 
-**JNI dynamic binding** (`analysis/app/src/dlanalysis/jni_dynamic/`):
-- `extract_jni_bindings.py` -- parses ELF `.data.rel.ro` sections to recover `JNINativeMethod[]` registration tables from compiled `.so` files, mapping Java methods to their C implementations
+**JNI dynamic binding**:
+- `scripts/extract_registernatives_binary.py` recovers `JNINativeMethod[]` registrations from container libraries when methods are registered through `RegisterNatives` instead of exported as `Java_*` symbols
 
 ---
 
@@ -409,7 +344,7 @@ python3 generate_seccomp.py \
 }
 ```
 
-Everything not explicitly allowed is denied (`SCMP_ACT_ERRNO`). This is the most restrictive policy that still permits the application to function.
+Everything not explicitly allowed is denied (`SCMP_ACT_ERRNO`). The generated profile is a restrictive, container-specific allowlist derived from observed artifacts and static reachability; it should be validated with the workload before deployment.
 
 ### Using the Profile
 
