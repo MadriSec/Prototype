@@ -102,7 +102,7 @@ JVM_SRC_NORM = os.path.expanduser((JVM_SRC or "").strip().strip('"').strip("'"))
 JVM_SO  = os.environ.get("JVM_SO", "")
 output_dir = os.environ.get("OUTPUTS_DIR", ".").strip() or "."
 
-DEBUG_LOG_PATH = "/home/rupesh.punna/EchoTrace/.cursor/debug-2d3c38.log"
+DEBUG_LOG_PATH = os.path.join(PROJECT_ROOT, ".cursor", "debug-2d3c38.log")
 DEBUG_SESSION_ID = "2d3c38"
 
 
