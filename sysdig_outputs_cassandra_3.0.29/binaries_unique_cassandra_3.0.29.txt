@@ -1,3 +1,0 @@
-/bin/sh
-/opt/java/openjdk/bin/java
-/sbin/ldconfig.real
