@@ -46,7 +46,7 @@ java.lang.System.nanoTime  →  Java_java_lang_System_nanoTime (in libjava.so)
 
 ---
 
-## 2. JNI Dynamic Binding [RegisterNatives](https://github.com/MadriSec/Prototype/blob/main/src/main/java/com/echotrace/app/bytecode_new/JNI_Dynamic_Binding.md)
+## 2. JNI Dynamic Binding 
 
 **File:** `JNIDyn.java`
 
@@ -70,8 +70,7 @@ JNIEXPORT void JNI_OnLoad(JavaVM *vm, void *reserved) {
 
 ---
 
-## 3. JNA Interface Mapping- [Deep Dive](https://github.com/MadriSec/Prototype/blob/main/src/main/java/com/echotrace/app/bytecode_new/JNA_INTERFACE_DETECTION.md)
-
+## 3. JNA Interface Mapping- 
 **File:** `JnaIfaceDetector.java`
 
 **Java pattern:**
