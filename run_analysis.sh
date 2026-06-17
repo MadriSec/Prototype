@@ -1,7 +1,9 @@
 #!/bin/bash
 set -e  # stop if any command fails
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #IMG_SAFE=cassandra_3.0.29 \
-#LIBS_DIR=/home/rupesh.punna/EchoTrace/LIBS_cassandra_3.0.29 \
+#LIBS_DIR=${SCRIPT_DIR}/LIBS_cassandra_3.0.29 \
 #  bash run_analysis.sh
 ANALYSIS_MODE="${ANALYSIS_MODE:-FULL_BYTECODE}"
 
@@ -11,9 +13,9 @@ if [ -z "${IMG_SAFE:-}" ]; then
     exit 1
 fi
 
-LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-/home/rupesh.punna/EchoTrace/LIBS_${IMG_SAFE}}}"
-OUTPUTS_BASE_DIR="${OUTPUTS_DIR:-/home/rupesh.punna/EchoTrace/outputs_${IMG_SAFE}}"
-RUNTIME_BASE_DIR="${RUNTIME_DIR:-/home/rupesh.punna/EchoTrace/RUNTIME_${IMG_SAFE}}"
+LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-${SCRIPT_DIR}/LIBS_${IMG_SAFE}}}"
+OUTPUTS_BASE_DIR="${OUTPUTS_DIR:-${SCRIPT_DIR}/outputs_${IMG_SAFE}}"
+RUNTIME_BASE_DIR="${RUNTIME_DIR:-${SCRIPT_DIR}/RUNTIME_${IMG_SAFE}}"
 mkdir -p "$OUTPUTS_BASE_DIR"
 
 if [ "$ANALYSIS_MODE" = "FULL_BYTECODE" ]; then
@@ -27,21 +29,21 @@ if [ "$ANALYSIS_MODE" = "FULL_BYTECODE" ]; then
         echo "============================================================"
         echo " STEP 1: Running bytecode analysis"
         echo "============================================================"
-        JAR_BASE_DIR="${JARFILES_DIR:-/home/rupesh.punna/EchoTrace/JARFILES_${IMG_SAFE}}"
+        JAR_BASE_DIR="${JARFILES_DIR:-${SCRIPT_DIR}/JARFILES_${IMG_SAFE}}"
 
         BYTECODE_MODE="${BYTECODE_MODE:-1}"
         echo "Bytecode analysis mode: $BYTECODE_MODE"
 
         if [ "$BYTECODE_MODE" = "2" ]; then
             echo "Running FinalPrototype (start from main)..."
-            java -cp "target/echotrace-1.0-SNAPSHOT.jar:target/deps/*" \
+            java -cp "${SCRIPT_DIR}/target/echotrace-1.0-SNAPSHOT.jar:${SCRIPT_DIR}/target/deps/*" \
               com.echotrace.app.bytecode_new.FinalPrototype \
               "${JAR_BASE_DIR}" \
               "${JAR_BASE_DIR}" \
               --1
         else
             echo "Running JNADetector (JNA/JNR/FFI + all native methods)..."
-            mvn -f /home/rupesh.punna/EchoTrace/pom.xml -q compile exec:java \
+            mvn -f "${SCRIPT_DIR}/pom.xml" -q clean compile exec:java \
               -Dexec.mainClass=com.echotrace.app.bytecode_new.JNADetector \
               -Dexec.args="${JAR_BASE_DIR} ${OUTPUTS_BASE_DIR} ${RUNTIME_BASE_DIR}"
         fi
@@ -50,13 +52,13 @@ if [ "$ANALYSIS_MODE" = "FULL_BYTECODE" ]; then
     # echo "============================================================"
     # echo " STEP 2: Running formatter.py"
     # echo "============================================================"
-    # python3 /home/rupesh.punna/EchoTrace/formatter.py
+    # python3 ${SCRIPT_DIR}/formatter.py
 
     echo "============================================================"
     echo " STEP 2: Native mapping and start-function preparation"
     echo "============================================================"
     LIBS_IMAGE="${LIBS_BASE_DIR}" OUTPUTS_DIR="${OUTPUTS_BASE_DIR}" \
-      bash /home/rupesh.punna/EchoTrace/prepare_native_mapping.sh
+      bash "${SCRIPT_DIR}/prepare_native_mapping.sh"
     echo "============================================================"
     echo " Analysis pipeline completed!"
     echo "============================================================"
@@ -73,16 +75,16 @@ echo "============================================================"
 echo " STEP 5: Running binary_analysis"
 echo "============================================================"
 
-LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-/home/rupesh.punna/EchoTrace/LIBS_${IMG_SAFE}}}"
-STARTFUNCS_DIR="${OUTPUTS_DIR:-/home/rupesh.punna/EchoTrace/outputs_${IMG_SAFE}}"
-SYSCALLS_OUT_DIR="${SYSCALLS_OUTPUT_DIR:-/home/rupesh.punna/EchoTrace/syscalls_output_${IMG_SAFE}}"
-BINARIES_BASE_DIR="${BINARIES_DIR:-/home/rupesh.punna/EchoTrace/BINARIES_${IMG_SAFE}}"
+LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-${SCRIPT_DIR}/LIBS_${IMG_SAFE}}}"
+STARTFUNCS_DIR="${OUTPUTS_DIR:-${SCRIPT_DIR}/outputs_${IMG_SAFE}}"
+SYSCALLS_OUT_DIR="${SYSCALLS_OUTPUT_DIR:-${SCRIPT_DIR}/syscalls_output_${IMG_SAFE}}"
+BINARIES_BASE_DIR="${BINARIES_DIR:-${SCRIPT_DIR}/BINARIES_${IMG_SAFE}}"
 
 # Determine which binaries to analyze based on mode
 if [ "$ANALYSIS_MODE" = "FULL_BYTECODE" ]; then
     # Standard flow: analyze libraries based on mapper.py output
     echo "Analyzing libraries with mapped native methods..."
-    bash /home/rupesh.punna/EchoTrace/automate_syscall_analysis.sh \
+    bash "${SCRIPT_DIR}/automate_syscall_analysis.sh" \
       --binary-dir "${LIBS_BASE_DIR}" \
       --binaries-dir "${BINARIES_BASE_DIR}" \
       --startfunc-dir "${STARTFUNCS_DIR}" \
@@ -138,7 +140,7 @@ elif [ "$ANALYSIS_MODE" = "LIBRARY_SYMBOLS" ]; then
         fi
     done
 
-    bash /home/rupesh.punna/EchoTrace/automate_syscall_analysis.sh \
+    bash "${SCRIPT_DIR}/automate_syscall_analysis.sh" \
       --binary-dir "${LIBS_BASE_DIR}" \
       --binaries-dir "${BINARIES_BASE_DIR}" \
       --startfunc-dir "${STARTFUNCS_DIR}" \
@@ -153,7 +155,7 @@ elif [ "$ANALYSIS_MODE" = "BINARY_ONLY" ]; then
     # automate_syscall_analysis.sh handles binary start function generation
     # internally via create_binary_start_file. We just pass --binaries-dir
     # and --binaries-only to skip .so processing.
-    bash /home/rupesh.punna/EchoTrace/automate_syscall_analysis.sh \
+    bash "${SCRIPT_DIR}/automate_syscall_analysis.sh" \
       --binary-dir "${LIBS_BASE_DIR}" \
       --binaries-dir "${BINARIES_BASE_DIR}" \
       --output-dir "${SYSCALLS_OUT_DIR}" \
@@ -166,5 +168,5 @@ echo "============================================================"
 echo " Binary analysis completed!"
 echo "============================================================"
 echo " STEP 6: Running combine_syscalls.sh"
-# bash /home/rupesh.punna/EchoTrace/combine_syscalls.sh "${SYSCALLS_OUT_DIR}"
+# bash "${SCRIPT_DIR}/combine_syscalls.sh "${SYSCALLS_OUT_DIR}"
 echo "============================================================"
