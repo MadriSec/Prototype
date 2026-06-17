@@ -72,7 +72,7 @@ public class PrototypeFinal {
     private static Set<String> dependencyClasses = new HashSet<>();
 
     // HybridByteCodeTracer fields (Mode 1)
-    private static String pathPrefix = "/home/rupesh.punna/Prototype/JARFILES/";
+    private static String pathPrefix = "JARFILES/";
     /**
      * Where Mode 1 writes its results.  Initialised to a CWD-relative fallback
      * overridden per-run to <project_root>/outputs_<IMG_SAFE>/native_methods.txt
