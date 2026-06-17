@@ -1,25 +1,27 @@
 #!/bin/bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Check if SKIP_BYTECODE_ANALYSIS is set - skip directly to mapper
 if [ "${SKIP_BYTECODE_ANALYSIS:-0}" = "1" ]; then
     echo "============================================================"
     echo " SKIP_BYTECODE_ANALYSIS=1 - Skipping to mapper stage"
     echo "============================================================"
     echo "Using default paths:"
-    echo "  - Native methods: /home/rupesh.punna/EchoTrace/native_methods.txt"
-    echo "  - LIBS_DIR:       ${LIBS_DIR:-/home/rupesh.punna/EchoTrace/LIBS}"
+    echo "  - Native methods: ${SCRIPT_DIR}/native_methods.txt"
+    echo "  - LIBS_DIR:       ${LIBS_DIR:-${SCRIPT_DIR}/LIBS}"
     echo "============================================================"
 
-    LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-/home/rupesh.punna/EchoTrace/LIBS}}"
-    OUTPUTS_BASE_DIR="${OUTPUTS_DIR:-/home/rupesh.punna/EchoTrace/outputs}"
+    LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-${SCRIPT_DIR}/LIBS}}"
+    OUTPUTS_BASE_DIR="${OUTPUTS_DIR:-${SCRIPT_DIR}/outputs}"
 
     echo ""
     echo "============================================================"
     echo " STEP 2: Native mapping and start-function preparation"
     echo "============================================================"
     LIBS_IMAGE="${LIBS_BASE_DIR}" OUTPUTS_DIR="${OUTPUTS_BASE_DIR}" \
-      bash /home/rupesh.punna/EchoTrace/prepare_native_mapping.sh
+      bash "${SCRIPT_DIR}/prepare_native_mapping.sh"
 
     echo "============================================================"
     echo " Analysis pipeline completed!"
@@ -38,21 +40,21 @@ echo "------------------------------------------------------------"
 IMG_RAW=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_ID" 2>/dev/null || echo "$CONTAINER_ID")
 IMG_SAFE=$(echo "$IMG_RAW" | tr '/:@' '___' | sed 's/[^A-Za-z0-9._-]/_/g')
 export IMG_SAFE
-export JARFILES_DIR="/home/rupesh.punna/EchoTrace/JARFILES_${IMG_SAFE}"
-export JARFILES_IMAGE="/home/rupesh.punna/EchoTrace/JARFILES_${IMG_SAFE}"
-export LIBS_DIR="/home/rupesh.punna/EchoTrace/LIBS_${IMG_SAFE}"
-export LIBS_IMAGE="/home/rupesh.punna/EchoTrace/LIBS_${IMG_SAFE}"
-export BINARIES_DIR="/home/rupesh.punna/EchoTrace/BINARIES_${IMG_SAFE}"
-export OUTPUTS_DIR="/home/rupesh.punna/EchoTrace/outputs_${IMG_SAFE}"
-export RUNTIME_DIR="/home/rupesh.punna/EchoTrace/RUNTIME_${IMG_SAFE}"
-export SYSCALLS_OUTPUT_DIR="/home/rupesh.punna/EchoTrace/syscalls_output_${IMG_SAFE}"
+export JARFILES_DIR="${SCRIPT_DIR}/JARFILES_${IMG_SAFE}"
+export JARFILES_IMAGE="${SCRIPT_DIR}/JARFILES_${IMG_SAFE}"
+export LIBS_DIR="${SCRIPT_DIR}/LIBS_${IMG_SAFE}"
+export LIBS_IMAGE="${SCRIPT_DIR}/LIBS_${IMG_SAFE}"
+export BINARIES_DIR="${SCRIPT_DIR}/BINARIES_${IMG_SAFE}"
+export OUTPUTS_DIR="${SCRIPT_DIR}/outputs_${IMG_SAFE}"
+export RUNTIME_DIR="${SCRIPT_DIR}/RUNTIME_${IMG_SAFE}"
+export SYSCALLS_OUTPUT_DIR="${SCRIPT_DIR}/syscalls_output_${IMG_SAFE}"
 
 # Ensure image-scoped outputs directory exists and point generic 'outputs' symlink to it
 mkdir -p "$OUTPUTS_DIR"
-if [ -L "/home/rupesh.punna/EchoTrace/outputs" ] || [ -e "/home/rupesh.punna/EchoTrace/outputs" ]; then
-  rm -rf "/home/rupesh.punna/EchoTrace/outputs"
+if [ -L "${SCRIPT_DIR}/outputs" ] || [ -e "${SCRIPT_DIR}/outputs" ]; then
+  rm -rf "${SCRIPT_DIR}/outputs"
 fi
-ln -s "$OUTPUTS_DIR" "/home/rupesh.punna/EchoTrace/outputs"
+ln -s "$OUTPUTS_DIR" "${SCRIPT_DIR}/outputs"
 
 if [ "${SKIP_SYSDIG:-0}" = "1" ]; then
     echo "============================================================"
@@ -67,12 +69,12 @@ else
     echo "============================================================"
     echo " STEP 1: Unified Sysdig Capture (Libraries, Binaries, JARs)"
     echo "============================================================"
-    bash /home/rupesh.punna/EchoTrace/sysdig_unified.sh "$CONTAINER_ID" "120"
+    bash "${SCRIPT_DIR}/sysdig_unified.sh" "$CONTAINER_ID" "120"
 
     echo "============================================================"
     echo " STEP 1.5: Extracting runtime and JAR native libraries"
     echo "============================================================"
-    bash /home/rupesh.punna/EchoTrace/extract_runtime_and_jar_libs.sh "$CONTAINER_ID"
+    bash "${SCRIPT_DIR}/extract_runtime_and_jar_libs.sh" "$CONTAINER_ID"
 fi
 
 echo "============================================================"
@@ -127,20 +129,20 @@ export ANALYSIS_MODE
 echo "============================================================"
 echo " STEP 3: Running Static Analysis (Mode: $ANALYSIS_MODE)"
 echo "============================================================"
-bash /home/rupesh.punna/EchoTrace/run_analysis.sh
+bash "${SCRIPT_DIR}/run_analysis.sh"
 
 echo ""
 echo "============================================================"
 echo " STEP 4: Organizing results into results/${IMG_SAFE}/"
 echo "============================================================"
 
-# RESULTS_DIR="/home/rupesh.punna/EchoTrace/results/${IMG_SAFE}"
+# RESULTS_DIR="${SCRIPT_DIR}/results/${IMG_SAFE}"
 # mkdir -p "$RESULTS_DIR/Binary_Analysis" \
 #          "$RESULTS_DIR/ByteCode_Analysis" \
 #          "$RESULTS_DIR/Dynamic_Analysis" \
 #          "$RESULTS_DIR/Extracted_Data"
 
-# BASE="/home/rupesh.punna/EchoTrace"
+# BASE="${SCRIPT_DIR}"
 
 # # --- Binary_Analysis ---
 # for dir in "syscalls_BIN_${IMG_SAFE}" "syscalls_LIBS_${IMG_SAFE}" "syscalls_output_${IMG_SAFE}"; do
