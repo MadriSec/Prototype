@@ -404,22 +404,6 @@ runc.txt                       # baseline runtime syscalls merged into generated
 
 The `SysPartCode/` submodule tracks the upstream [SysPartCode optimizations branch](https://github.com/vidyalakshmir/SysPartCode/tree/optimizations).
 
-Generated analysis artifacts are intentionally ignored by Git:
-
-```text
-BINARIES_*/
-JARFILES_*/
-LIBS_*/
-RUNTIME_*/
-outputs_*/
-sysdig_outputs_*/
-syscalls_output_*/
-syscalls_BIN_*/
-syscalls_LIBS_*/
-target/
-outputs
-```
-
 ---
 
 
