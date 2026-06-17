@@ -1,0 +1,5 @@
+16:11:07.098742096 execve java /opt/java/openjdk/bin/java
+16:11:19.361395356 execve java /opt/java/openjdk/bin/java
+16:11:19.361833010 execve ldconfig /bin/sh
+16:11:19.368442493 execve ldconfig /bin/sh
+16:11:19.368794779 execve ldconfig.real /sbin/ldconfig.real

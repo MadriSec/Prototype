@@ -48,6 +48,32 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 #############################################################################
+# Function: build_user_library_path
+# Description: Build USER_LIBRARY_PATH that includes BINARY_DIR and all
+#   JDK<V>_LIBS subdirectories so ldd can resolve libjvm.so etc.
+#   Handles both JDK 8 (amd64/server/) and JDK 9+ (server/) layouts.
+# Arguments: $1 - base BINARY_DIR (e.g. LIBS_jetty_9.4.51)
+# Returns: colon-separated path string via stdout
+#############################################################################
+build_user_library_path() {
+    local base_dir="$1"
+    local paths="$base_dir"
+
+    # Find all JDK<V>_LIBS directories
+    for jdk_dir in "$base_dir"/JDK*_LIBS; do
+        [ -d "$jdk_dir" ] || continue
+        paths="$paths:$jdk_dir"
+
+        # Add all subdirectories that contain .so files
+        while IFS= read -r subdir; do
+            [ -n "$subdir" ] && paths="$paths:$subdir"
+        done < <(find "$jdk_dir" -mindepth 1 -type d 2>/dev/null | sort)
+    done
+
+    echo "$paths"
+}
+
+#############################################################################
 # Function: print_usage
 # Description: Display usage information
 #############################################################################
@@ -228,16 +254,33 @@ find_binary_file() {
     # Remove leading numbers (e.g., 1libjava.so -> libjava.so)
     binary_name=$(echo "$binary_name" | sed 's/^[0-9]*//g')
 
-    # Search for the binary in BINARY_DIR
-    local binary_path="$BINARY_DIR/$binary_name"
+    # If startfunc_file is an absolute path or contains the STARTFUNC_DIR prefix,
+    # derive the relative subpath so we can look for subdirectories
+    # (e.g. JDK8_LIBS/amd64/libnet.so under BINARY_DIR).
+    local rel_path="$binary_name"
+    if [[ -n "${STARTFUNC_DIR:-}" && "$startfunc_file" == "$STARTFUNC_DIR"/* ]]; then
+        # Strip STARTFUNC_DIR prefix and .txt suffix to get relative binary path
+        rel_path="${startfunc_file#$STARTFUNC_DIR/}"
+        rel_path="${rel_path%.txt}"
+    fi
 
+    # Try relative subpath first (e.g. BINARY_DIR/JDK8_LIBS/amd64/libnet.so)
+    local binary_path="$BINARY_DIR/$rel_path"
     if [ -f "$binary_path" ]; then
         echo "$binary_path"
         return 0
     fi
 
-    # If not found, try without the numeric prefix
-    log_message "WARNING" "Binary not found: $binary_path"
+    # Fallback: try flat basename (e.g. BINARY_DIR/libnet.so)
+    local flat_name
+    flat_name=$(basename "$binary_name")
+    binary_path="$BINARY_DIR/$flat_name"
+    if [ -f "$binary_path" ]; then
+        echo "$binary_path"
+        return 0
+    fi
+
+    log_message "WARNING" "Binary not found: $BINARY_DIR/$rel_path"
     return 1
 }
 
@@ -385,9 +428,12 @@ process_binary() {
         return 1
     fi
 
+    local lib_path
+    lib_path=$(build_user_library_path "$BINARY_DIR")
+
     log_message "INFO" "Executing command:"
     echo "    cd $syspart_app_dir"
-    echo "    USER_LIBRARY_PATH=\"$BINARY_DIR\" \\"
+    echo "    USER_LIBRARY_PATH=\"$lib_path\" \\"
     echo "      $compute_script \\"
     echo "      \"$binary_path\" \\"
     echo "      \"$output_dir\" \\"
@@ -395,7 +441,7 @@ process_binary() {
     echo "      --log"
     echo ""
 
-    USER_LIBRARY_PATH="$BINARY_DIR" $compute_script \
+    USER_LIBRARY_PATH="$lib_path" $compute_script \
         "$binary_path" \
         "$output_dir" \
         "$start_file" \
@@ -454,12 +500,12 @@ process_library() {
     local startfunc_basename=$(basename "$startfunc_file")
     local lib_name="${startfunc_basename%.txt}"
 
-    log_message "INFO" "Processing: $startfunc_basename"
+    log_message "INFO" "Processing: $startfunc_file"
 
-    # Find corresponding binary
-    local binary_path=$(find_binary_file "$startfunc_basename")
+    # Find corresponding binary (pass full path so subdir structure is preserved)
+    local binary_path=$(find_binary_file "$startfunc_file")
     if [ -z "$binary_path" ]; then
-        log_message "ERROR" "Could not find binary for: $startfunc_basename"
+        log_message "ERROR" "Could not find binary for: $startfunc_file"
         return 1
     fi
 
@@ -490,17 +536,19 @@ process_library() {
         return 1
     fi
 
-    # Build the command with USER_LIBRARY_PATH as environment variable
-    # Syspart will first check this path while resolving library paths
-    # before falling back to system-defined libraries
-    local cmd="USER_LIBRARY_PATH=\"$BINARY_DIR\" $compute_script \"$binary_path\" \"$output_dir\" \"$startfunc_file\""
+    # Build USER_LIBRARY_PATH including JDK lib subdirectories
+    # so ldd can resolve libjvm.so, libjava.so, etc.
+    local lib_path
+    lib_path=$(build_user_library_path "$BINARY_DIR")
+
+    local cmd="USER_LIBRARY_PATH=\"$lib_path\" $compute_script \"$binary_path\" \"$output_dir\" \"$startfunc_file\""
 
     if [ -n "$ENABLE_LOG" ]; then
         cmd="$cmd --log"
     fi
 
     log_message "INFO" "Executing from: $syspart_app_dir"
-    log_message "INFO" "USER_LIBRARY_PATH=$BINARY_DIR"
+    log_message "INFO" "USER_LIBRARY_PATH=$lib_path"
     log_message "INFO" "Command: $cmd"
 
     eval $cmd
@@ -553,10 +601,13 @@ main() {
     if [ -n "$BINARIES_ONLY" ]; then
         log_message "INFO" "Skipping library analysis (--binaries-only)"
     else
-        # Find all start function files
-        local startfunc_files=("$STARTFUNC_DIR"/*.txt)
+        # Find all start function files (including subdirectories like JDK8_LIBS/amd64/)
+        local startfunc_files=()
+        while IFS= read -r f; do
+            startfunc_files+=("$f")
+        done < <(find "$STARTFUNC_DIR" \( -name "*.so.txt" -o -name "*.so.[0-9]*.txt" \) -type f | sort)
 
-        if [ ! -e "${startfunc_files[0]}" ]; then
+        if [ ${#startfunc_files[@]} -eq 0 ]; then
             log_message "ERROR" "No start function files found in: $STARTFUNC_DIR"
             exit 1
         fi

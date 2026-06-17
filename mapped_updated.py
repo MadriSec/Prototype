@@ -3,20 +3,36 @@
 #
 # Purpose:
 #   Map fully-qualified Java methods (e.g., `java.lang.System.nanoTime`) to their
-#   native implementations by combining three sources of truth:
-#     1) Exported symbols in ELF libraries (via nm) for standard JNI `Java_*` and
-#        library-specific conventions (e.g., Netty `netty_*`).
-#     2) OpenJDK source `JNINativeMethod` tables (optional; when `JVM_SRC` is set),
-#        which link Java methods to C targets (e.g., `JVM_*` or custom functions).
+#   native implementations by combining several sources of truth:
+#     1) Exported symbols in ELF libraries (via nm) for standard JNI `Java_*` methods.
+#     2) RegisterNatives tables extracted directly from the container's libjvm.so
+#        binary (via extract_registernatives_binary.py), linking Java methods to
+#        C targets (e.g., `JVM_*` or custom functions).  Falls back to OpenJDK
+#        source `JNINativeMethod` tables (when `JVM_SRC` is set).
 #     3) Symbol resolution across transitive runtime dependencies (via ldd) to
 #        identify which `.so` actually defines a target symbol.
+#     4) jni_dynamic_bindings.txt from OUTPUTS_DIR/<IMG_SAFE>/ ONLY
+#        (the canonical extract_jni_bindings.py output for this container);
+#        plus optional JNI_DYNAMIC_BINDING_DIRS (explicit opt-in via env var).
+#        cwd / LIBS_<IMG_SAFE>/ / supplemental third-party dirs (netty_libs,
+#        netty_libs_all, hawtjni_libs, hadoop_libs, hadoop_ec_downloads) are
+#        no longer auto-walked: those generic dumps cover Netty/Hadoop versions
+#        the container does not actually ship and leaked false positives.
 #
 # Key environment inputs:
 #   - LIB_DIRS: os.pathsep-separated directories to scan for ELF `.so` files.
+#     Under each LIBS_<IMG_SAFE> directory, optional subfolders named JDK<N>_LIBS/
+#     (e.g. JDK11_LIBS/) are auto-discovered.  Also supported:
+#       - JDK_LIBS_DIRS / JDK_LIBS_DIR: explicit path(s) to JDK<N>_LIBS trees
+#         (pathsep-separated, same as LIB_DIRS).
+#       - Sibling fallback: if LIBS_<name>-slim has no JDK*_LIBS/, also look under
+#         LIBS_<name>/ (strip trailing "-slim") for JDK*_LIBS/.
 #   - JVM_SRC:  Path to the OpenJDK source tree (optional).
 #   - JVM_SO:   Explicit path to `libjvm.so` (optional, auto-discovered if unset).
 #   - METHODS_FILE: File listing Java methods (one per line) to classify.
 #   - OUTPUTS_DIR: Directory for output files (default: current directory).
+#   - JNI_DYNAMIC_BINDING_DIRS (optional): extra directories that contain
+#     jni_dynamic_bindings.txt (same path separator as LIB_DIRS).
 #
 # Outputs (in OUTPUTS_DIR):
 #   - mapped_method_syscalls.txt: Per-method resolution details and classification tags.
@@ -32,6 +48,10 @@ import time
 # ----------------------------
 # Config / Inputs
 # ----------------------------
+# Project root is the directory containing this script (e.g. /home/rupesh.punna/EchoTrace).
+# Used to render LIBS_<IMG_SAFE>/libfoo.so as a project-relative path in the output.
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 env_lib_dirs = os.environ.get("LIB_DIRS")
 if env_lib_dirs:
     LIB_DIRS = [p for p in env_lib_dirs.split(os.pathsep) if p]
@@ -46,6 +66,9 @@ else:
             "  - LIB_DIRS: colon-separated list of directories to scan for .so files\n"
             "  - LIBS_IMAGE: single directory containing libraries for a specific container image\n"
             "  - LIBS_DIR: single directory containing libraries\n"
+            "Optional — container JDK native libs (libjava.so, server/libjvm.so, …):\n"
+            "  - Put them under LIBS_<IMG>/JDK<N>_LIBS/ (see scripts/extract_container_jdk.py --libs-only), or\n"
+            "  - Set JDK_LIBS_DIRS (or JDK_LIBS_DIR) to explicit JDK<N>_LIBS path(s).\n"
         )
         sys.exit(1)
 
@@ -72,12 +95,14 @@ def normalize_lib_dirs(lib_dirs: list) -> list:
             normalized.append(lib_dir)
     return normalized
 
-JVM_SRC = os.environ.get("JVM_SRC", "")
+JVM_SRC = os.environ.get("JVM_SRC",
+                         os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      ".tmp_jdk8_native/jdk/src/share/native"))
 JVM_SRC_NORM = os.path.expanduser((JVM_SRC or "").strip().strip('"').strip("'"))
 JVM_SO  = os.environ.get("JVM_SO", "")
 output_dir = os.environ.get("OUTPUTS_DIR", ".").strip() or "."
 
-DEBUG_LOG_PATH = "/home/rupesh.punna/Prototype/.cursor/debug-2d3c38.log"
+DEBUG_LOG_PATH = "/home/rupesh.punna/EchoTrace/.cursor/debug-2d3c38.log"
 DEBUG_SESSION_ID = "2d3c38"
 
 
@@ -98,7 +123,7 @@ def debug_log(run_id: str, hypothesis_id: str, message: str, data: dict):
         pass
 
 # #region agent log
-debug_log("cassandra-netty-tcnative", "H0", "mapped_updated.py module loaded", {
+debug_log("mapper-bootstrap", "H0", "mapped_updated.py module loaded", {
     "pythonExecutable": sys.executable,
     "cwd": os.getcwd(),
 })
@@ -106,27 +131,146 @@ debug_log("cassandra-netty-tcnative", "H0", "mapped_updated.py module loaded", {
 
 LIB_DIRS = normalize_lib_dirs(LIB_DIRS)
 
-# ----------------------------
-# Add supplemental JDK library directories for multi-version symbol resolution
-# ----------------------------
-# When analyzing JRuby (JDK 8) bytecode that references JDK 9+ methods,
-# we need to search multiple JDK versions to resolve symbols correctly.
-supplemental_jdk_dirs = [
-    "/home/rupesh.punna/Prototype/LIBS_jdk8_temurin",   # Standard JDK 8 (for debugging tools)
-    "/home/rupesh.punna/Prototype/LIBS_jdk11_temurin",  # JDK 11 (JDK 9+ features)
-    "/home/rupesh.punna/Prototype/LIBS_jdk17_temurin",  # JDK 17 LTS (sealed classes, FFM incubating)
-    "/home/rupesh.punna/Prototype/LIBS_jdk21_temurin",  # JDK 21 LTS (virtual threads, FFM preview)
-    "/home/rupesh.punna/Prototype/netty_libs",          # Netty native transport libraries
-    "/home/rupesh.punna/Prototype/netty_libs_all",      # Multiple Netty versions (4.1.50-4.1.113)
-    "/home/rupesh.punna/Prototype/hawtjni_libs",        # Eclipse SWT (for HawtJNI)
-    "/home/rupesh.punna/Prototype/hadoop_libs",         # Apache Hadoop 3.2.0 native libraries
-    "/home/rupesh.punna/Prototype/hadoop_ec_downloads",
-]
+# Auto-append LIBS_<IMG>/JDK<N>_LIBS/, explicit JDK_LIBS_DIRS, and -slim sibling fallback.
+_JDK_LIBS_SUBDIR = re.compile(r"^JDK\d+_LIBS$")
 
-for jdk_dir in supplemental_jdk_dirs:
-    if os.path.isdir(jdk_dir) and jdk_dir not in LIB_DIRS:
-        LIB_DIRS.append(jdk_dir)
-        print(f"INFO: Added supplemental JDK library directory: {jdk_dir}")
+
+def _explicit_jdk_libs_dirs_from_env():
+    raw = os.environ.get("JDK_LIBS_DIRS") or os.environ.get("JDK_LIBS_DIR") or ""
+    out = []
+    for p in raw.split(os.pathsep):
+        p = p.strip()
+        if not p:
+            continue
+        if os.path.isdir(p):
+            out.append(os.path.abspath(p))
+        else:
+            print(f"WARN: JDK_LIBS path does not exist (skipped): {p}", file=sys.stderr)
+    return out
+
+
+def collect_jdk_native_tree_dirs(seed_lib_dirs: list) -> list:
+    """
+    Find JDK<N>_LIBS directories to scan for libjava.so / server/libjvm.so, etc.
+
+    Sources (de-duplicated):
+      1) JDK_LIBS_DIRS / JDK_LIBS_DIR env
+      2) Direct children JDK<N>_LIBS under each entry in seed_lib_dirs
+      3) If dir basename ends with '-slim', same under sibling LIBS_<rest>/JDK<N>_LIBS/
+
+    Returns list of (abs_path, source_label).
+    """
+    entries = []  # (abs_path, label)
+    seen = set()
+
+    def add(path: str, label: str):
+        a = os.path.abspath(path)
+        if a not in seen and os.path.isdir(a):
+            seen.add(a)
+            entries.append((a, label))
+
+    for a in _explicit_jdk_libs_dirs_from_env():
+        add(a, f"env: {a}")
+
+    for d in seed_lib_dirs:
+        abs_d = os.path.abspath(d)
+        if not os.path.isdir(abs_d):
+            continue
+        try:
+            names = sorted(os.listdir(abs_d))
+        except OSError:
+            names = []
+        for name in names:
+            if not _JDK_LIBS_SUBDIR.match(name):
+                continue
+            sub = os.path.join(abs_d, name)
+            if os.path.isdir(sub):
+                add(sub, f"child: {abs_d}/{name}")
+
+        base = os.path.basename(abs_d)
+        parent = os.path.dirname(abs_d)
+        if base.endswith("-slim"):
+            sibling = os.path.join(parent, base[:-5])
+            if os.path.isdir(sibling):
+                try:
+                    s_names = sorted(os.listdir(sibling))
+                except OSError:
+                    s_names = []
+                for name in s_names:
+                    if not _JDK_LIBS_SUBDIR.match(name):
+                        continue
+                    sub = os.path.join(sibling, name)
+                    if os.path.isdir(sub):
+                        add(sub, f"sibling: {sibling}/{name} (for {base})")
+
+    return entries
+
+
+def merge_lib_dirs_with_jdk_trees(user_lib_dirs: list, tuples_jdk: list):
+    """Prefix order: user roots first, then JDK trees. tuples_jdk: [(path, label), ...].
+    Returns (merged_abs_paths, list of (added_path, label) for logging)."""
+    jdk_paths = [p for p, _ in tuples_jdk]
+    label_for = {os.path.abspath(p): lb for p, lb in tuples_jdk}
+    seen = set()
+    merged = []
+    for d in user_lib_dirs:
+        a = os.path.abspath(d)
+        if a not in seen:
+            seen.add(a)
+            merged.append(a)
+    added_pairs = []
+    for a in jdk_paths:
+        a = os.path.abspath(a)
+        if a not in seen:
+            merged.append(a)
+            seen.add(a)
+            added_pairs.append((a, label_for.get(a, "")))
+    return merged, added_pairs
+
+
+_user_lib_abs = [os.path.abspath(d) for d in LIB_DIRS]
+_jdk_entries = collect_jdk_native_tree_dirs(_user_lib_abs)
+LIB_DIRS, _jdk_added_pairs = merge_lib_dirs_with_jdk_trees(_user_lib_abs, _jdk_entries)
+_JDK_NATIVE_EXTRA = [p for p, _ in _jdk_added_pairs]
+if _JDK_NATIVE_EXTRA:
+    print("INFO: Appended JDK native lib trees (JDK*_LIBS/) for symbol scan:")
+    for p, lab in _jdk_added_pairs:
+        print(f"  + {p}")
+        print(f"      ({lab})")
+
+# The script is strictly per-container: only the user-provided LIBS_<IMG_SAFE>
+# directories feed symbol/binding resolution.  Supplemental third-party native
+# bundles (the previous netty_libs / netty_libs_all / hawtjni_libs / hadoop_libs
+# / hadoop_ec_downloads list) and JDK-specific fallbacks (system
+# /usr/lib/jvm/java-8-openjdk-amd64/*, LIBS_jdk8_temurin) have all been removed
+# deliberately:
+#   * extract_jni_bindings.py now ships per-container output at
+#     OUTPUTS_DIR/<IMG_SAFE>/jni_dynamic_bindings.txt for the Netty/HawtJNI/
+#     Hadoop/etc. bundles the container actually loads.
+#   * extract_registernatives_binary.py on LIBS_<IMG_SAFE>/libjvm.so covers
+#     JVM_*/Unsafe_*/MHN_* etc., filtered against libjvm.so symbols.
+# Mixing in generic third-party dumps was leaking versions of Netty/Hadoop/SWT
+# the container does not ship; mixing in JDK-8 system libs produced false
+# positives like
+#   libnio.so:java.nio.MappedByteBuffer.force0 -> Java_java_nio_MappedByteBuffer_force0
+# against a JDK-17 container that actually exports Java_java_nio_MappedMemoryUtils_force0.
+PRIMARY_LIB_DIRS = list(LIB_DIRS)
+
+
+# Resolve a library path to a priority bucket. Lower number = higher priority.
+# 0..len(PRIMARY_LIB_DIRS)-1: inside a user-provided LIB_DIR (LIBS_<IMG_SAFE>)
+# 999:                         anywhere else (system path / ldd-resolved / unknown)
+_PRIMARY_LIB_DIRS_ABS = [os.path.abspath(d) for d in PRIMARY_LIB_DIRS]
+
+
+def lib_priority(lib_path):
+    if not lib_path:
+        return 999
+    abs_path = os.path.abspath(lib_path)
+    for i, ad in enumerate(_PRIMARY_LIB_DIRS_ABS):
+        if abs_path == ad or abs_path.startswith(ad + os.sep):
+            return i
+    return 999
 
 print("DEBUG: Using LIB_DIRS:")
 for d in LIB_DIRS:
@@ -174,7 +318,146 @@ def load_methods(path: str) -> list:
         return methods
 
 
+def discover_shaded_netty_prefixes(methods: list) -> list:
+    """
+    Find relocated Netty package roots (e.g. com.datastax.shaded.netty).
+    Same JNI natives Register as io.netty.*; JNI_DYNAMIC tables use canonical io.netty FQNs.
+    """
+    prefixes = set()
+    netty_pkg_rx = re.compile(
+        r"^([a-zA-Z][a-zA-Z0-9_$.]*\.netty)\.(channel\.(unix|epoll|kqueue)|internal\.tcnative)\."
+    )
+    try:
+        for line in methods:
+            m = netty_pkg_rx.match(line)
+            if m:
+                prefix = m.group(1)
+                if prefix != "io.netty":
+                    prefixes.add(prefix)
+    except Exception as e:
+        print(f"WARN: Could not discover shaded netty prefixes: {e}", file=sys.stderr)
+
+    result = sorted(prefixes)
+    if result:
+        print(f"INFO: Shaded Netty prefixes (JNI_DYNAMIC alias): {result}")
+    return result
+
+
+def iter_jni_dynamic_lookup_keys(original: str, lookup: str, shaded_prefixes: list):
+    """Yield candidates for jni_dynamic_map: bytecode FQN, lookup, shaded→io.netty,
+    and Errors ↔ ErrorsStaticallyReferencedJniMethods (extractor historically used Errors.*)."""
+    declared = "io.netty.channel.unix.ErrorsStaticallyReferencedJniMethods."
+    inferred_bad = "io.netty.channel.unix.Errors."
+
+    seeds = []
+    for m in (original, lookup):
+        if not m:
+            continue
+        seeds.append(m)
+        for p in shaded_prefixes:
+            if m.startswith(p + "."):
+                seeds.append(m.replace(p, "io.netty", 1))
+
+    expanded = []
+    for m in seeds:
+        expanded.append(m)
+        if m.startswith(declared):
+            expanded.append(inferred_bad + m[len(declared):])
+        elif m.startswith(inferred_bad):
+            expanded.append(declared + m[len(inferred_bad):])
+
+    seen = set()
+    for m in expanded:
+        if m not in seen:
+            seen.add(m)
+            yield m
+
+
+# Methods on io.netty.channel.unix.Socket whose JNI signatures are built dynamically at JNI_OnLoad
+# (see netty_unix_socket.c: recvFromAddress / recvFromDomainSocket). Static jni_dynamic_bindings
+# extraction misses them; exported symbols follow netty_unix_socket_<jniSimpleName>.
+_NETTY_UNIX_SOCKET_MARKER = ".channel.unix.Socket."
+_NETTY_UNIX_SOCKET_JNI_SIMPLE_RE = re.compile(r"^[a-zA-Z_$][a-zA-Z0-9_$]*$")
+
+
+def try_netty_unix_socket_nm_fallback(original: str, lookup: str, shaded_prefixes: list, libs: list):
+    """
+    Resolve RegisterNatives-backed unix.Socket methods via exported netty_unix_socket_* symbols.
+    """
+    for m in iter_jni_dynamic_lookup_keys(original, lookup, shaded_prefixes):
+        idx = m.find(_NETTY_UNIX_SOCKET_MARKER)
+        if idx < 0:
+            continue
+        jni_simple = m[idx + len(_NETTY_UNIX_SOCKET_MARKER):]
+        if not jni_simple or not _NETTY_UNIX_SOCKET_JNI_SIMPLE_RE.match(jni_simple):
+            continue
+        sym = f"netty_unix_socket_{jni_simple}"
+        owner = resolve_symbol_in_libs(sym, libs)
+        if owner:
+            return owner, sym, m
+    return None
+
+
+_NETTY_JAVA_MEMBER_RE = re.compile(r"^[a-zA-Z_$][a-zA-Z0-9_$]*$")
+
+
+def netty_epoll_java_class_token(java_simple_class: str) -> str:
+    """LinuxSocket -> linuxsocket (matches netty_epoll_* native prefixes)."""
+    parts = re.findall(r"[A-Z][a-z]*|[a-z]+|[0-9]+", java_simple_class)
+    return "".join(p.lower() for p in parts)
+
+
+def try_netty_internal_tcnative_nm_fallback(original: str, lookup: str, shaded_prefixes: list, libs: list):
+    """
+    netty_internal_tcnative_SSLContext_addFoo -> io.netty.internal.tcnative.SSLContext.addFoo
+    Used when JNI_DYNAMIC misses (new methods, odd layouts). Class name keeps Java PascalCase in the symbol.
+    """
+    marker = ".internal.tcnative."
+    for m in iter_jni_dynamic_lookup_keys(original, lookup, shaded_prefixes):
+        pos = m.find(marker)
+        if pos < 0:
+            continue
+        tail = m[pos + len(marker):]
+        dot = tail.rfind(".")
+        if dot <= 0:
+            continue
+        cls, meth = tail[:dot], tail[dot + 1:]
+        if not _NETTY_JAVA_MEMBER_RE.match(cls) or not _NETTY_JAVA_MEMBER_RE.match(meth):
+            continue
+        sym = f"netty_internal_tcnative_{cls}_{meth}"
+        owner = resolve_symbol_in_libs(sym, libs)
+        if owner:
+            return owner, sym, m
+    return None
+
+
+def try_netty_channel_epoll_nm_fallback(original: str, lookup: str, shaded_prefixes: list, libs: list):
+    """
+    netty_epoll_linuxsocket_getPeerCredentials -> io.netty.channel.epoll.LinuxSocket.getPeerCredentials
+    Same idea as unix.Socket nm fallback: symbols always exported even when ELF RegisterNatives extraction misses.
+    """
+    marker = ".channel.epoll."
+    for m in iter_jni_dynamic_lookup_keys(original, lookup, shaded_prefixes):
+        pos = m.find(marker)
+        if pos < 0:
+            continue
+        tail = m[pos + len(marker):]
+        dot = tail.rfind(".")
+        if dot <= 0:
+            continue
+        cls, meth = tail[:dot], tail[dot + 1:]
+        if not _NETTY_JAVA_MEMBER_RE.match(cls) or not _NETTY_JAVA_MEMBER_RE.match(meth):
+            continue
+        tok = netty_epoll_java_class_token(cls)
+        sym = f"netty_epoll_{tok}_{meth}"
+        owner = resolve_symbol_in_libs(sym, libs)
+        if owner:
+            return owner, sym, m
+    return None
+
+
 methods = load_methods(methods_file)
+shaded_netty_prefixes = discover_shaded_netty_prefixes(methods)
 
 detailed_output_file = os.path.join(output_dir, "mapped_method_syscalls.txt")
 
@@ -235,6 +518,10 @@ JVM_BUILTIN_NATIVES = {
     "java.lang.Object.notifyAll":       "JVM_MonitorNotifyAll",
     "java.lang.Object.hashCode":        "JVM_IHashCode",
     "java.lang.Object.clone":           "JVM_Clone",
+    # System methods registered in libjava.so's JNI_OnLoad but targeting libjvm.so exports
+    "java.lang.System.arraycopy":       "JVM_ArrayCopy",
+    "java.lang.System.currentTimeMillis": "JVM_CurrentTimeMillis",
+    "java.lang.System.nanoTime":        "JVM_NanoTime",
 }
 
 # Some Unsafe natives exist as local (non-exported) libjvm symbols and are not
@@ -275,6 +562,13 @@ METHOD_ALIASES = {
     "com.github.luben.zstd.Zstd.searchLengthMin": "com.github.luben.zstd.Zstd.searchLogMin",
 }
 
+# Netty transport-native-unix: C registers netty_unix_limits_* onto
+# LimitsStaticallyReferencedJniMethods: The binary extraction now correctly uses the
+# full class name (io.netty.channel.unix.LimitsStaticallyReferencedJniMethods) so these
+# legacy aliases pointing to the short "Limits." form are no longer needed.
+# The cross-class alias (epoll.NativeStaticallyReferencedJniMethods -> unix.Limits*)
+# is handled in the registered_method_map lookup fallback (step 3).
+
 # ----------------------------
 # JDK 8 ↔ JDK 9+ Package Renames
 # ----------------------------
@@ -308,13 +602,142 @@ JDK8_JDK9_PACKAGE_RENAMES = {
 JDK8_JDK9_METHOD_RENAMES = {
     # Signal.findSignal0 (JDK 9+) → Signal.findSignal (JDK 8)
     "jdk.internal.misc.Signal.findSignal0": "sun.misc.Signal.findSignal",
+
+    # Unsafe moved from sun.misc.Unsafe to jdk.internal.misc.Unsafe in JDK 9.
+    # Several native entrypoint names also gained a trailing "0" wrapper in
+    # JDK 9+, while the JDK 8 RegisterNatives table uses the public sun.misc
+    # method name.  These aliases let bytecode extracted from JDK 9+ classes
+    # resolve against a JDK 8 / Temurin 8 libjvm.so.
+    "jdk.internal.misc.Unsafe.allocateMemory0": "sun.misc.Unsafe.allocateMemory",
+    "jdk.internal.misc.Unsafe.freeMemory0": "sun.misc.Unsafe.freeMemory",
+    "jdk.internal.misc.Unsafe.reallocateMemory0": "sun.misc.Unsafe.reallocateMemory",
+    "jdk.internal.misc.Unsafe.setMemory0": "sun.misc.Unsafe.setMemory",
+    "jdk.internal.misc.Unsafe.copyMemory0": "sun.misc.Unsafe.copyMemory",
+    "jdk.internal.misc.Unsafe.objectFieldOffset0": "sun.misc.Unsafe.objectFieldOffset",
+    "jdk.internal.misc.Unsafe.staticFieldOffset0": "sun.misc.Unsafe.staticFieldOffset",
+    "jdk.internal.misc.Unsafe.staticFieldBase0": "sun.misc.Unsafe.staticFieldBase",
+    "jdk.internal.misc.Unsafe.arrayBaseOffset0": "sun.misc.Unsafe.arrayBaseOffset",
+    "jdk.internal.misc.Unsafe.arrayIndexScale0": "sun.misc.Unsafe.arrayIndexScale",
+    "jdk.internal.misc.Unsafe.ensureClassInitialized0": "sun.misc.Unsafe.ensureClassInitialized",
+    "jdk.internal.misc.Unsafe.shouldBeInitialized0": "sun.misc.Unsafe.shouldBeInitialized",
+    "jdk.internal.misc.Unsafe.defineAnonymousClass0": "sun.misc.Unsafe.defineAnonymousClass",
+    "jdk.internal.misc.Unsafe.compareAndSetInt": "sun.misc.Unsafe.compareAndSwapInt",
+    "jdk.internal.misc.Unsafe.compareAndSetLong": "sun.misc.Unsafe.compareAndSwapLong",
+    "jdk.internal.misc.Unsafe.compareAndSetObject": "sun.misc.Unsafe.compareAndSwapObject",
+    "jdk.internal.misc.Unsafe.compareAndSetReference": "sun.misc.Unsafe.compareAndSwapObject",
+    "jdk.internal.misc.Unsafe.getReference": "sun.misc.Unsafe.getObject",
+    "jdk.internal.misc.Unsafe.putReference": "sun.misc.Unsafe.putObject",
+    "jdk.internal.misc.Unsafe.getReferenceVolatile": "sun.misc.Unsafe.getObjectVolatile",
+    "jdk.internal.misc.Unsafe.putReferenceVolatile": "sun.misc.Unsafe.putObjectVolatile",
 }
+
+for _unsafe_name in (
+    "addressSize",
+    "allocateInstance",
+    "getBoolean",
+    "getByte",
+    "getChar",
+    "getDouble",
+    "getFloat",
+    "getInt",
+    "getIntVolatile",
+    "getLong",
+    "getLongVolatile",
+    "getObject",
+    "getObjectVolatile",
+    "getShort",
+    "loadFence",
+    "pageSize",
+    "park",
+    "putBoolean",
+    "putByte",
+    "putChar",
+    "putDouble",
+    "putFloat",
+    "putInt",
+    "putLong",
+    "putLongVolatile",
+    "putObject",
+    "putObjectVolatile",
+    "putShort",
+    "storeFence",
+    "throwException",
+    "unpark",
+):
+    JDK8_JDK9_METHOD_RENAMES.setdefault(
+        f"jdk.internal.misc.Unsafe.{_unsafe_name}",
+        f"sun.misc.Unsafe.{_unsafe_name}",
+    )
+
+# Reverse aliases for the opposite mixed-JDK case: bytecode/native_methods.txt
+# contains JDK 8 sun.misc.Unsafe names, but the selected runtime libjvm.so is
+# JDK 9+ and its RegisterNatives table contains jdk.internal.misc.Unsafe names.
+SUN_UNSAFE_TO_JDK_INTERNAL = {
+    "sun.misc.Unsafe.addressSize": "jdk.internal.misc.Unsafe.addressSize0",
+    "sun.misc.Unsafe.allocateMemory": "jdk.internal.misc.Unsafe.allocateMemory0",
+    "sun.misc.Unsafe.arrayBaseOffset": "jdk.internal.misc.Unsafe.arrayBaseOffset0",
+    "sun.misc.Unsafe.arrayIndexScale": "jdk.internal.misc.Unsafe.arrayIndexScale0",
+    "sun.misc.Unsafe.compareAndSwapInt": "jdk.internal.misc.Unsafe.compareAndSetInt",
+    "sun.misc.Unsafe.compareAndSwapLong": "jdk.internal.misc.Unsafe.compareAndSetLong",
+    "sun.misc.Unsafe.compareAndSwapObject": "jdk.internal.misc.Unsafe.compareAndSetObject",
+    "sun.misc.Unsafe.copyMemory": "jdk.internal.misc.Unsafe.copyMemory0",
+    "sun.misc.Unsafe.defineAnonymousClass": "jdk.internal.misc.Unsafe.defineAnonymousClass0",
+    "sun.misc.Unsafe.defineClass": "jdk.internal.misc.Unsafe.defineClass0",
+    "sun.misc.Unsafe.ensureClassInitialized": "jdk.internal.misc.Unsafe.ensureClassInitialized0",
+    "sun.misc.Unsafe.freeMemory": "jdk.internal.misc.Unsafe.freeMemory0",
+    "sun.misc.Unsafe.objectFieldOffset": "jdk.internal.misc.Unsafe.objectFieldOffset0",
+    "sun.misc.Unsafe.reallocateMemory": "jdk.internal.misc.Unsafe.reallocateMemory0",
+    "sun.misc.Unsafe.setMemory": "jdk.internal.misc.Unsafe.setMemory0",
+    "sun.misc.Unsafe.shouldBeInitialized": "jdk.internal.misc.Unsafe.shouldBeInitialized0",
+    "sun.misc.Unsafe.staticFieldBase": "jdk.internal.misc.Unsafe.staticFieldBase0",
+    "sun.misc.Unsafe.staticFieldOffset": "jdk.internal.misc.Unsafe.staticFieldOffset0",
+}
+
+for _unsafe_name in (
+    "allocateInstance",
+    "fullFence",
+    "getBoolean",
+    "getByte",
+    "getChar",
+    "getDouble",
+    "getFloat",
+    "getInt",
+    "getIntVolatile",
+    "getLong",
+    "getLongVolatile",
+    "getObject",
+    "getObjectVolatile",
+    "getShort",
+    "loadFence",
+    "pageSize",
+    "park",
+    "putBoolean",
+    "putByte",
+    "putChar",
+    "putDouble",
+    "putFloat",
+    "putInt",
+    "putLong",
+    "putLongVolatile",
+    "putObject",
+    "putObjectVolatile",
+    "putShort",
+    "storeFence",
+    "throwException",
+    "unpark",
+):
+    SUN_UNSAFE_TO_JDK_INTERNAL.setdefault(
+        f"sun.misc.Unsafe.{_unsafe_name}",
+        f"jdk.internal.misc.Unsafe.{_unsafe_name}",
+    )
 
 # ----------------------------
 # ZIP/NIO Method Name Variants
 # ----------------------------
-# Some JDK 9+ bytecode uses method names that don't match the actual JNI symbols
-# (e.g., inflateBufferBytes vs inflateBytes)
+# Some bytecode uses *BufferBytes / *BytesBytes native names while older JDK
+# libzip.so exported only shorter symbols (inflateBytes, deflateBytes).  We map
+# bytecode → short name for JVM tables, then try both names against nm-built
+# method_to_jni (see jni_lookup_candidates in the main loop).
 METHOD_NAME_VARIANTS = {
     # Inflater methods - BufferBytes variant → Bytes
     "java.util.zip.Inflater.inflateBufferBytes": "java.util.zip.Inflater.inflateBytes",
@@ -372,128 +795,6 @@ SOURCE_JNI_BRIDGES = {
     "java.security.AccessController.getInheritedAccessControlContext": "Java_java_security_AccessController_getInheritedAccessControlContext",
 }
 
-
-# Netty tcnative SSL.java native methods -> documented OpenSSL function names.
-# Source: https://netty.io/4.0/xref/io/netty/internal/tcnative/SSL.html
-# Only methods whose javadoc explicitly names an OpenSSL function are included;
-# methods without a documented C counterpart are intentionally omitted.
-TCNATIVE_SSL_OPENSSL = {
-    "newSSL":                 "SSL_new",
-    "getError":               "SSL_get_error",
-    "bioWrite":               "BIO_write",
-    "bioFlushByteBuffer":     "BIO_flush",
-    "sslPending":             "SSL_pending",
-    "writeToSSL":             "SSL_write",
-    "readFromSSL":            "SSL_read",
-    "getShutdown":            "SSL_get_shutdown",
-    "setShutdown":            "SSL_set_shutdown",
-    "freeSSL":                "SSL_free",
-    "freeBIO":                "BIO_free",
-    "shutdownSSL":            "SSL_shutdown",
-    "getCipherForSSL":        "SSL_get_cipher",
-    "getVersion":             "SSL_get_version",
-    "doHandshake":            "SSL_do_handshake",
-    "isInInit":               "SSL_in_init",
-    "getNextProtoNegotiated": "SSL_get0_next_proto_negotiated",
-    "getAlpnSelected":        "SSL_get0_alpn_selected",
-    "getTime":                "SSL_get_time",
-    "getTimeout":             "SSL_get_timeout",
-    "setTimeout":             "SSL_set_timeout",
-    "setMode":                "SSL_set_mode",
-    "getMode":                "SSL_get_mode",
-    "getMaxWrapOverhead":     "SSL_max_seal_overhead",
-    "renegotiate":            "SSL_renegotiate",
-    "setState":               "SSL_set_state",
-    "setTlsExtHostName":      "SSL_set_tlsext_host_name",
-    "setHostNameValidation":  "X509_check_host",
-    "enableOcsp":             "SSL_set_tlsext_status_type",
-    # --- Additional documented mappings (high-confidence from javadoc evidence) ---
-    "version":                "OpenSSL_version_num",
-    "versionString":          "OpenSSL_version",
-    "getLastErrorNumber":     "ERR_peek_last_error",
-    "getErrorString":         "ERR_error_string",
-    "getPeerCertChain":       "SSL_get_peer_cert_chain",
-    "getPeerCertificate":     "SSL_get_peer_certificate",
-    "setVerify":              "SSL_set_verify",
-    "setOptions":             "SSL_set_options",
-    "clearOptions":           "SSL_clear_options",
-    "getOptions":             "SSL_get_options",
-    "getCiphers":             "SSL_get_ciphers",
-    "setCipherSuites":        "SSL_set_cipher_list",
-    "getSessionId":           "SSL_SESSION_get_id",
-    "clearError":             "ERR_clear_error",
-    "parsePrivateKey":        "PEM_read_bio_PrivateKey",
-    "freePrivateKey":         "EVP_PKEY_free",
-    # OCSP payload setter/getter: javadoc links to SSL_set_tlsext_status_type
-    # (the enabler), but that's what enableOcsp already maps to. The semantically
-    # correct symbols for setting/getting the OCSP response payload are:
-    "setOcspResponse":        "SSL_set_tlsext_status_ocsp_resp",
-    "getOcspResponse":        "SSL_get_tlsext_status_ocsp_resp",
-}
-
-# Netty tcnative SSLContext.java native methods -> documented OpenSSL function names.
-# Source: https://chromium.googlesource.com/external/netty-tcnative/+/refs/heads/master/java/io/netty/internal/tcnative/SSLContext.java
-# Only methods with explicit javadoc evidence or an unambiguous SSL_CTX_* naming
-# convention are included. tcnative-internal helpers (e.g., sessionTicketKey*
-# stats counters) and multi-call wrappers are intentionally omitted.
-TCNATIVE_SSLCONTEXT_OPENSSL = {
-    "make":                      "SSL_CTX_new",
-    "free":                      "SSL_CTX_new",
-    "setOptions":                "SSL_CTX_set_options",
-    "getOptions":                "SSL_CTX_get_options",
-    "clearOptions":              "SSL_CTX_clear_options",
-    "setCipherSuite":            "SSL_CTX_set_cipher_list",
-    "setCertificate":            "SSL_CTX_use_certificate",
-    "setCertificateBio":         "SSL_CTX_use_certificate",
-    "setCertificateChainBio":    "tcn_SSL_CTX_use_certificate_chain_bio",
-    "setCACertificateBio":       "tcn_SSL_CTX_use_client_CA_bio",
-    "setCertificateChainFile":   "SSL_CTX_use_certificate_chain_file",
-    "setSessionCacheSize":       "SSL_CTX_sess_set_cache_size",
-    "getSessionCacheSize":       "SSL_CTX_sess_get_cache_size",
-    "setSessionCacheTimeout":    "SSL_CTX_set_timeout",
-    "getSessionCacheTimeout":    "SSL_CTX_get_timeout",
-    "setSessionCacheMode":       "SSL_CTX_set_session_cache_mode",
-    "getSessionCacheMode":       "SSL_CTX_get_session_cache_mode",
-    "sessionAccept":             "SSL_CTX_sess_accept",
-    "sessionAcceptGood":         "SSL_CTX_sess_accept_good",
-    "sessionAcceptRenegotiate":  "SSL_CTX_sess_accept_renegotiate",
-    "sessionCacheFull":          "SSL_CTX_sess_cache_full",
-    "sessionCbHits":             "SSL_CTX_sess_cb_hits",
-    "sessionConnect":            "SSL_CTX_sess_connect",
-    "sessionConnectGood":        "SSL_CTX_sess_connect_good",
-    "sessionConnectRenegotiate": "SSL_CTX_sess_connect_renegotiate",
-    "sessionHits":               "SSL_CTX_sess_hits",
-    "sessionMisses":             "SSL_CTX_sess_misses",
-    "sessionNumber":             "SSL_CTX_sess_number",
-    "sessionTimeouts":           "SSL_CTX_sess_timeouts",
-    # Ticket key stats are exposed by SSLContext.java as native counters.
-    "sessionTicketKeyNew":       "SSL_CTX_sess_ticket_key_new",
-    "sessionTicketKeyResume":    "SSL_CTX_sess_ticket_key_resume",
-    "sessionTicketKeyRenew":     "SSL_CTX_sess_ticket_key_renew",
-    "sessionTicketKeyFail":      "SSL_CTX_sess_ticket_key_fail",
-    "setVerify":                 "SSL_CTX_set_verify",
-    "setCertVerifyCallback":     "SSL_CTX_set_cert_verify_callback",
-    "setCertRequestedCallback":  "SSL_CTX_set_client_cert_cb",
-    "setSniHostnameMatcher":     "SSL_CTX_set_tlsext_servername_callback",
-    "setTmpDHLength":            "SSL_CTX_set_tmp_dh_callback",
-    "setSessionTicketKeys":      "SSL_CTX_set_tlsext_ticket_key_cb",
-    "enableOcsp":                "SSL_CTX_set_tlsext_status_cb",
-    "disableOcsp":               "SSL_CTX_set_tlsext_status_cb",
-    "setAlpnProtos":             "SSL_CTX_set_alpn_protos",
-    # setContextId hashes its String arg then calls SSL_CTX_set_session_id_context;
-    # same underlying OpenSSL symbol as setSessionIdContext (intentional collision).
-    "setContextId":              "SSL_CTX_set_session_id_context",
-    "setSessionIdContext":       "SSL_CTX_set_session_id_context",
-    "setMode":                   "SSL_CTX_set_mode",
-    "getMode":                   "SSL_CTX_get_mode",
-}
-
-# Dispatch tuple for stage 1.4: (fully-qualified class prefix, per-class map).
-# Prefixes include the trailing dot so "SSL." and "SSLContext." never overlap.
-TCNATIVE_CLASS_MAPS = (
-    ("io.netty.internal.tcnative.SSLContext.", TCNATIVE_SSLCONTEXT_OPENSSL),
-    ("io.netty.internal.tcnative.SSL.",        TCNATIVE_SSL_OPENSSL),
-)
 
 # Sigar high-level gather methods that map to native "Sigar_get*List" entrypoints.
 SIGAR_LIST_BRIDGES = {
@@ -589,6 +890,20 @@ def jni_to_java_method(jni_name: str):
     return mangled
 
 
+def is_mangled_jni(jni_name: str) -> bool:
+    """Return True if the JNI symbol uses escape sequences beyond simple underscores.
+    i.e. _1 (literal underscore), _2 (semicolon), _3 (bracket),
+    _0xxxx (unicode), or __ (overload suffix)."""
+    if not jni_name.startswith("Java_"):
+        return False
+    raw = jni_name[5:]
+    if re.search(r'__(?![0-3])', raw):      # overload suffix
+        return True
+    if re.search(r'_[0-3]', raw):            # _1 _2 _3 or _0xxxx escape
+        return True
+    return False
+
+
 def load_defined_symbols(so_path: str, pattern: str) -> set:
     """
     Extract defined symbol names from an ELF shared library matching a regex pattern.
@@ -640,97 +955,47 @@ def ldd_paths(binary_path: str) -> list:
 def collect_search_libs(seed_libs: list, extra_dirs: list) -> list:
     """
     Build a comprehensive list of ELF libraries to search for symbol definitions.
-    Combines seed libraries with all their transitive dependencies (via ldd) and
-    all libraries found in additional directories.
+
+    Search order (first match wins in resolve_symbol_in_libs):
+      1. Seed libraries (libjvm.so, libjava.so) — always checked first.
+      2. Container-extracted libraries from extra_dirs (LIBS_*/) — these are the
+         actual libraries inside the container and should take priority over
+         host-system libraries resolved via ldd.
+      3. Transitive ldd dependencies of the seed libraries — host-system fallback
+         for symbols not found in the container extraction.
     """
     seen = set()
     out = []
 
-    queue = [p for p in seed_libs if p and os.path.exists(p)]
-    while queue:
-        cur = queue.pop()
-        if cur in seen:
-            continue
-        seen.add(cur)
-        if is_elf(cur):
-            out.append(cur)
-            for dep in ldd_paths(cur):
-                if dep not in seen:
-                    queue.append(dep)
+    # 1. Seed libraries first (libjvm.so, libjava.so).
+    for p in seed_libs:
+        if p and os.path.exists(p) and p not in seen:
+            seen.add(p)
+            if is_elf(p):
+                out.append(p)
 
+    # 2. Container-extracted libraries (LIBS_*/) — preferred over system libs.
     for d in extra_dirs:
-        for p in glob.glob(os.path.join(d, "lib*.so*")):
-            if p not in seen and is_elf(p):
+        if not os.path.isdir(d):
+            continue
+        for p in glob.glob(os.path.join(os.path.abspath(d), "**", "lib*.so*"), recursive=True):
+            if p not in seen and os.path.isfile(p) and is_elf(p):
                 out.append(p)
                 seen.add(p)
 
+    # 3. Transitive ldd dependencies of seed libs — host-system fallback.
+    ldd_queue = [p for p in seed_libs if p and os.path.exists(p)]
+    while ldd_queue:
+        cur = ldd_queue.pop()
+        if is_elf(cur):
+            for dep in ldd_paths(cur):
+                if dep not in seen:
+                    seen.add(dep)
+                    if is_elf(dep):
+                        out.append(dep)
+                        ldd_queue.append(dep)
+
     return out
-
-def build_class_maps(methods: list) -> tuple:
-    """
-    Derive netty class name maps dynamically from the methods file.
-    Reads actual Java class names and maps their lowercase token
-    (as it appears in nm symbols) to the correct CamelCase class name.
-    
-    e.g. com.datastax.shaded.netty.channel.unix.FileDescriptor.close
-         -> 'filedescriptor' -> 'FileDescriptor'
-    """
-    unix_map  = {}
-    epoll_map = {}
-
-    # Match any netty package (canonical or shaded) — no hardcoded vendor prefixes.
-    # Captures the class name from e.g. "*.netty.channel.unix.FileDescriptor.close"
-    unix_rx = re.compile(r'\.netty\.channel\.unix\.([A-Za-z]+)\.')
-    epoll_rx = re.compile(r'\.netty\.channel\.epoll\.([A-Za-z]+)\.')
-
-    try:
-        for line in methods:
-            m = unix_rx.search(line)
-            if m:
-                class_name = m.group(1)
-                unix_map[class_name.lower()] = class_name
-
-            m = epoll_rx.search(line)
-            if m:
-                class_name = m.group(1)
-                epoll_map[class_name.lower()] = class_name
-
-    except Exception as e:
-        print(f"WARN: Could not build class maps from methods file: {e}", file=sys.stderr)
-
-    print(f"INFO: Derived unix class map:  {unix_map}")
-    print(f"INFO: Derived epoll class map: {epoll_map}")
-    return unix_map, epoll_map
-
-
-def discover_shaded_netty_prefixes(methods: list) -> list:
-    """
-    Scan the methods file to discover all shaded/relocated netty package prefixes.
-    Returns a list of prefix strings (e.g., 'com.datastax.shaded.netty',
-    'org.apache.storm.shade.io.netty') that are aliases for 'io.netty'.
-    Detected dynamically from the methods present in the input — no hardcoded vendors.
-    """
-    prefixes = set()
-    # Match methods in known netty subpackages: channel.unix, channel.epoll,
-    # channel.kqueue, internal.tcnative — and extract the prefix before them.
-    # Only match valid Java package names (letters, digits, dots, underscores, $).
-    netty_pkg_rx = re.compile(
-        r'^([a-zA-Z][a-zA-Z0-9_$.]*\.netty)\.(channel\.(unix|epoll|kqueue)|internal\.tcnative)\.'
-    )
-    try:
-        for line in methods:
-            m = netty_pkg_rx.match(line)
-            if m:
-                prefix = m.group(1)
-                if prefix != "io.netty":
-                    prefixes.add(prefix)
-    except Exception as e:
-        print(f"WARN: Could not discover shaded netty prefixes: {e}", file=sys.stderr)
-
-    result = sorted(prefixes)
-    if result:
-        print(f"INFO: Discovered shaded netty prefixes: {result}")
-    return result
 
 
 def resolve_symbol_in_libs(symbol: str, libs: list):
@@ -803,168 +1068,54 @@ def get_library_symbol_index(so: str, require_full: bool = False) -> set:
         LIB_SYMBOL_INDEX_FULL.add(so)
     return symbols
 
-
-def build_netty_map(lib_paths: list, methods: list, shaded_prefixes: list = None) -> dict:
-    netty_map = {}
-
-    # Derive class name maps and method sets from the methods file — no hardcoding
-    UNIX_CLASS_MAP, EPOLL_CLASS_MAP = build_class_maps(methods)
-
-    netty_libs = [p for p in lib_paths if 'netty' in os.path.basename(p).lower()]
-
-    for lib in netty_libs:
-        try:
-            out = subprocess.check_output(
-                ["nm", lib],
-                universal_newlines=True,
-                stderr=subprocess.DEVNULL,
-            )
-            for line in out.splitlines():
-                if 'netty_' not in line:
-                    continue
-                parts = line.split()
-
-                # Handle both:
-                #   "addr t symbol"  (3 parts)
-                #   "t symbol"       (2 parts — local symbols, no address)
-                if len(parts) == 3:
-                    symbol_type = parts[1]
-                    symbol      = parts[2]
-                elif len(parts) == 2:
-                    symbol_type = parts[0]
-                    symbol      = parts[1]
-                else:
-                    continue
-
-                if symbol_type not in ('t', 'T') or not symbol.startswith('netty_'):
-                    continue
-
-                # Skip JNI lifecycle symbols — not Java native methods
-                if symbol.endswith(('JNI_OnLoad', 'JNI_OnUnLoad', 'JNI_OnUnload')):
-                    continue
-
-                components = symbol[6:].split('_')
-                if len(components) < 3:
-                    continue
-
-                if components[0] == 'internal' and len(components) >= 4 and components[1] == 'tcnative':
-                    class_name  = components[2]
-                    method_name = '_'.join(components[3:])
-                    java_method = "io.netty.internal.tcnative.{class_name}.{method_name}"
-                    netty_map[java_method] = (symbol, lib)
-                    for prefix in (shaded_prefixes or []):
-                        netty_map[java_method.replace("io.netty", prefix, 1)] = (symbol, lib)
-
-                elif components[0] == 'unix' and len(components) >= 3:
-                    class_token = components[1]
-                    class_name  = UNIX_CLASS_MAP.get(class_token, class_token.title())
-                    # Join ALL remaining components as method name
-                    # handles multi-word methods: netty_unix_errors_strError -> strError
-                    method_name = '_'.join(components[2:])
-                    java_method = f"io.netty.channel.unix.{class_name}.{method_name}"
-                    netty_map[java_method] = (symbol, lib)
-                    for prefix in (shaded_prefixes or []):
-                        netty_map[java_method.replace("io.netty", prefix, 1)] = (symbol, lib)
-
-                elif components[0] == 'epoll' and len(components) >= 3:
-                    class_token = components[1]
-                    class_name  = EPOLL_CLASS_MAP.get(class_token, class_token.title())
-                    method_name = '_'.join(components[2:])
-                    java_method = f"io.netty.channel.epoll.{class_name}.{method_name}"
-                    netty_map[java_method] = (symbol, lib)
-                    for prefix in (shaded_prefixes or []):
-                        netty_map[java_method.replace("io.netty", prefix, 1)] = (symbol, lib)
-
-                elif len(components) >= 2:
-                    java_method = f"io.netty.channel.{components[0]}.{'_'.join(components[1:])}"
-                    netty_map[java_method] = (symbol, lib)
-                    for prefix in (shaded_prefixes or []):
-                        netty_map[java_method.replace("io.netty", prefix, 1)] = (symbol, lib)
-
-        except Exception as e:
-            print(f"WARN: Failed to process netty lib {lib}: {e}", file=sys.stderr)
-
-    return netty_map
-
-def match_netty_method(method: str, netty_symbols: dict, shaded_prefixes: list = None):
-    """
-    Fuzzy matching to associate a Java Netty method with a native netty_* symbol
-    when exact mapping wasn't found in build_netty_map().
-    Handles shaded netty packages by normalizing to canonical 'io.netty' form.
-    """
-    # Normalize shaded method to canonical io.netty form for matching
-    canonical = method
-    if not method.startswith("io.netty"):
-        for prefix in (shaded_prefixes or []):
-            if method.startswith(prefix):
-                canonical = "io.netty" + method[len(prefix):]
-                break
-        if not canonical.startswith("io.netty"):
-            return None
-
-    parts = canonical.split('.')
-    if len(parts) < 4:
-        return None
-
-    class_name  = parts[-2].lower()
-    method_name = parts[-1]
-    package_type = 'epoll' if 'epoll' in canonical else ('unix' if 'unix' in canonical else None)
-
-    patterns = []
-    if package_type:
-        patterns.append(f"netty_{package_type}_{class_name}_{method_name}")
-    patterns.append(f"netty_{class_name}_{method_name}")
-
-    for pattern in patterns:
-        for java_method, (symbol, lib_path) in netty_symbols.items():
-            if pattern.lower() in symbol.lower():
-                return (symbol, lib_path)
-
-    method_suffix = method_name.lower()
-    for java_method, (symbol, lib_path) in netty_symbols.items():
-        if symbol.lower().endswith(method_suffix):
-            return (symbol, lib_path)
-
-    return None
-
 # ----------------------------
-# Discover libraries (.so) — filter to ELF only
+# Discover libraries (.so) — filter to ELF only (recursive for JDK*/server/ layout)
 # ----------------------------
 so_paths: list = []
 for lib_dir in LIB_DIRS:
-    matched = glob.glob(os.path.join(lib_dir, "lib*.so*"))
-    for p in matched:
-        if is_elf(p):
+    if not os.path.isdir(lib_dir):
+        continue
+    pattern = os.path.join(os.path.abspath(lib_dir), "**", "lib*.so*")
+    for p in glob.glob(pattern, recursive=True):
+        if os.path.isfile(p) and is_elf(p):
             so_paths.append(p)
+so_paths = sorted(set(so_paths))
 
-so_basenames_lower = [os.path.basename(p).lower() for p in so_paths]
-has_chronicle_native_lib = any(
-    ("chronicle" in b) or ("affinity" in b) or ("ticker" in b)
-    for b in so_basenames_lower
-)
-has_commons_daemon_lib = any("daemon" in b for b in so_basenames_lower)
 
 
 def find_libjvm():
     """
     Locate libjvm.so, preferring LIB_DIRS, then JAVA_HOME, then system paths.
-    Returns path string or None.
+    Prefer .../JDK<N>_LIBS/server/libjvm.so over a top-level libjvm.so in LIBS_*.
     """
     if JVM_SO and os.path.isfile(JVM_SO):
         return JVM_SO
+    candidates = []
     for d in LIB_DIRS:
         for p in glob.glob(os.path.join(d, "**", "libjvm.so"), recursive=True):
             if os.path.isfile(p) and is_elf(p):
-                return p
+                candidates.append(p)
+
+    def sort_key(path: str):
+        path = path.replace("\\", "/")
+        in_jdk_tree = "JDK" in path and "_LIBS" in path
+        in_server = "/server/" in path
+        # Lower tuple sorts first in Python -> prefer (False,) for in_jdk... wait we want JDK first.
+        # (0,0) before (0,1) before (1,0): use (not in_jdk_tree, not in_server)
+        return (not in_jdk_tree, not in_server, len(path))
+
+    candidates.sort(key=sort_key)
+    if candidates:
+        return candidates[0]
     java_home = os.environ.get("JAVA_HOME")
-    candidates = []
+    fallback = []
     if java_home:
-        candidates += glob.glob(os.path.join(java_home, "lib", "server", "libjvm.so"))
-        candidates += glob.glob(os.path.join(java_home, "**", "libjvm.so"), recursive=True)
-    candidates += glob.glob("/usr/lib/jvm/**/lib/server/libjvm.so", recursive=True)
-    candidates += glob.glob("/usr/lib/jvm/**/libjvm.so", recursive=True)
-    candidates = [c for c in candidates if os.path.isfile(c) and is_elf(c)]
-    return candidates[0] if candidates else None
+        fallback += glob.glob(os.path.join(java_home, "lib", "server", "libjvm.so"))
+        fallback += glob.glob(os.path.join(java_home, "**", "libjvm.so"), recursive=True)
+    fallback += glob.glob("/usr/lib/jvm/**/lib/server/libjvm.so", recursive=True)
+    fallback += glob.glob("/usr/lib/jvm/**/libjvm.so", recursive=True)
+    fallback = [c for c in fallback if os.path.isfile(c) and is_elf(c)]
+    return fallback[0] if fallback else None
 
 
 libjvm_so = find_libjvm()
@@ -1012,106 +1163,239 @@ for method, variants in list(overloaded.items())[:5]:
         print(f"    {sym} ({os.path.basename(lib)})")
 
 # ----------------------------
-# Step 1.5: Netty mapping (netty_* symbols)
+# Step 1.7: JNI Dynamic Bindings (extract_jni_bindings.py output per lib tree)
 # ----------------------------
-shaded_netty_prefixes = discover_shaded_netty_prefixes(methods)
-netty_method_map = build_netty_map(so_paths, methods, shaded_netty_prefixes)
-# Tuple of all netty-related prefixes for fast startswith() checks
-_all_netty_prefixes = tuple(["io.netty"] + shaded_netty_prefixes)
-if netty_method_map:
-    print(f"INFO: Found {len(netty_method_map)} Netty native methods.")
-    for i, (method, (symbol, lib)) in enumerate(netty_method_map.items()):
-        if i < 5:
-            print(f"  {method} -> {symbol} ({os.path.basename(lib)})")
-        elif i == 5:
-            print("  ...")
-            break
-else:
-    print("INFO: No Netty libraries found or no netty_* symbols detected.")
-
-# ----------------------------
-# Step 1.7: JNI Dynamic Bindings (extracted via bytecode analysis)
-# ----------------------------
-def load_jni_dynamic_bindings(output_dir_path: str) -> dict:
+def _auto_extract_jni_bindings(libs_dir: str, output_dir_path: str) -> bool:
     """
-    Load JNI dynamic bindings extracted via bytecode analysis from JnaDynDetector/Mode4.
+    Run extract_jni_bindings.py against `libs_dir` and write
+    jni_dynamic_bindings.txt + jni_dynamic_summary.txt into `output_dir_path`.
+
+    Returns True iff jni_dynamic_bindings.txt is present (non-empty) afterwards.
+    """
+    if not libs_dir or not os.path.isdir(libs_dir):
+        return False
+
+    script_path = os.path.join(PROJECT_ROOT, "extract_jni_bindings.py")
+    if not os.path.isfile(script_path):
+        print(f"INFO: extract_jni_bindings.py not found at {script_path}; "
+              f"skipping JNI auto-extraction.")
+        return False
+
+    os.makedirs(os.path.abspath(output_dir_path), exist_ok=True)
+    out_path = os.path.join(output_dir_path, "jni_dynamic_bindings.txt")
+    print(f"INFO: Auto-extracting JNI dynamic bindings from {libs_dir} -> {out_path}")
+    try:
+        proc = subprocess.run(
+            [sys.executable, script_path,
+             "--libs-dir", libs_dir,
+             "--output-dir", output_dir_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as e:
+        print(f"WARNING: Failed to invoke {script_path}: {e}")
+        return False
+
+    if proc.returncode != 0:
+        tail = "\n  ".join((proc.stderr or "").strip().splitlines()[-5:])
+        print(f"INFO: JNI auto-extraction failed for {libs_dir} "
+              f"(exit {proc.returncode}); jni_dynamic table will be empty.\n  {tail}")
+        return False
+
+    # extract_jni_bindings.py prints a one-line summary to stdout; preserve it.
+    summary = (proc.stdout or "").strip()
+    if summary:
+        for line in summary.splitlines():
+            print(f"  {line}")
+
+    return os.path.isfile(out_path) and os.path.getsize(out_path) > 0
+
+
+def _auto_extract_registernatives_binary(so_files: list, output_dir_path: str) -> str:
+    """
+    Run extract_registernatives_binary.py against one or more .so files
+    (typically libjvm.so and libjava.so) and write jvm_dynamic_mapping.txt
+    into `output_dir_path`.
+
+    Returns the path to jvm_dynamic_mapping.txt if successful, empty string otherwise.
+    """
+    valid_so = [p for p in so_files if p and os.path.isfile(p)]
+    if not valid_so:
+        return ""
+
+    script_path = os.path.join(PROJECT_ROOT, "scripts", "extract_registernatives_binary.py")
+    if not os.path.isfile(script_path):
+        print(f"INFO: extract_registernatives_binary.py not found at {script_path}; "
+              f"skipping RegisterNatives binary extraction.")
+        return ""
+
+    os.makedirs(os.path.abspath(output_dir_path), exist_ok=True)
+    out_path = os.path.join(output_dir_path, "jvm_dynamic_mapping.txt")
+    so_names = ", ".join(os.path.basename(p) for p in valid_so)
+    print(f"INFO: Extracting RegisterNatives tables from [{so_names}] -> {out_path}")
+    try:
+        proc = subprocess.run(
+            [sys.executable, script_path] + valid_so + ["-o", out_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as e:
+        print(f"WARNING: Failed to invoke {script_path}: {e}")
+        return ""
+
+    if proc.returncode != 0:
+        tail = "\n  ".join((proc.stderr or "").strip().splitlines()[-5:])
+        print(f"INFO: RegisterNatives binary extraction failed "
+              f"(exit {proc.returncode}); will fall back to JVM_SRC source scan.\n  {tail}")
+        return ""
+
+    summary = (proc.stderr or "").strip()
+    if summary:
+        for line in summary.splitlines()[-5:]:
+            print(f"  {line}")
+
+    if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+        return out_path
+    return ""
+
+
+def discover_jni_dynamic_binding_paths(output_dir_path: str, primary_lib_dirs: list) -> list:
+    """
+    Resolve jni_dynamic_bindings.txt strictly from OUTPUTS_DIR/<IMG_SAFE>/.
+
+    If that file is missing, auto-generate it by running extract_jni_bindings.py
+    against the *first* user-provided LIB_DIR (LIBS_<IMG_SAFE>/).  This keeps
+    the binding table tied to the exact .so files the container actually ships,
+    matching the per-container scoping rule used for jvm_dynamic_mapping.txt.
+
+    The previous auto-walk over cwd, LIBS_<IMG_SAFE>/, and the supplemental
+    NON-JDK third-party bundles (netty_libs / netty_libs_all / hawtjni_libs /
+    hadoop_libs / hadoop_ec_downloads) was leaking Netty/Hadoop/SWT bindings
+    from versions the container does not actually ship.
+
+    `JNI_DYNAMIC_BINDING_DIRS` is preserved purely as an explicit opt-in escape
+    hatch for callers that need to layer in extra binding files; it is not
+    populated by anything in this script.
+
+    Returns a deduplicated, ordered list of absolute paths.
+    """
+    paths = []
+    seen = set()
+
+    def add_candidate(raw: str):
+        if not raw:
+            return
+        ap = os.path.abspath(raw)
+        if ap in seen:
+            return
+        if os.path.isfile(ap):
+            seen.add(ap)
+            paths.append(ap)
+
+    primary_path = os.path.join(output_dir_path, "jni_dynamic_bindings.txt")
+    if not os.path.isfile(primary_path) and primary_lib_dirs:
+        _auto_extract_jni_bindings(primary_lib_dirs[0], output_dir_path)
+
+    add_candidate(primary_path)
+
+    # Also extract JNI dynamic bindings from libjffi if present
+    for _lib_dir in primary_lib_dirs:
+        for _jffi_so in glob.glob(os.path.join(_lib_dir, "**", "libjffi*.so*"), recursive=True):
+            if os.path.isfile(_jffi_so) and is_elf(_jffi_so):
+                _jffi_out_dir = os.path.join(output_dir_path, "jffi_bindings")
+                _jffi_binding = os.path.join(_jffi_out_dir, "jni_dynamic_bindings.txt")
+                if not os.path.isfile(_jffi_binding):
+                    print(f"INFO: Auto-extracting JNI dynamic bindings from libjffi: {_jffi_so}")
+                    _auto_extract_jni_bindings(_lib_dir, _jffi_out_dir)
+                add_candidate(_jffi_binding)
+                break  # one extraction per lib_dir is enough
+
+    env_jni_dyn = os.environ.get("JNI_DYNAMIC_BINDING_DIRS")
+    if env_jni_dyn:
+        for part in env_jni_dyn.split(os.pathsep):
+            d = part.strip()
+            if d:
+                add_candidate(os.path.join(d, "jni_dynamic_bindings.txt"))
+    return paths
+
+
+def resolve_lib_for_jni_binding(lib_name: str, bindings_file: str, so_paths: list):
+    """
+    Prefer the .so next to the jni_dynamic_bindings.txt that referenced it (same tree),
+    then fall back to any matching basename in so_paths.
+    """
+    bind_dir = os.path.dirname(os.path.abspath(bindings_file))
+    local = os.path.join(bind_dir, lib_name)
+    if os.path.isfile(local):
+        return local
+    for so in so_paths:
+        if os.path.basename(so) == lib_name:
+            return so
+    return None
+
+
+def load_jni_dynamic_bindings(binding_paths: list, so_paths: list) -> dict:
+    """
+    Load JNI dynamic bindings from extract_jni_bindings.py output files.
     File format: libfoo.so|com.example.Class.method|(I)V|native_symbol|HIGH_CONF
     Returns: dict[java_method] -> (jni_symbol, library_path)
+
+    Conflict resolution per java_method (lower priority value wins):
+      0..N-1  : LIBS_<IMG_SAFE>/  (PRIMARY_LIB_DIRS, in order)
+      999     : unresolved or path outside the project tree
+
+    Tie-breaker at the same priority level: keep the first row encountered
+    (preserves file-order intent within a single source).
     """
-    candidates = [
-        os.path.join(output_dir_path, "jni_dynamic_bindings.txt"),
-        "jni_dynamic_bindings.txt",
-    ]
+    bindings: dict = {}
+    bindings_priority: dict = {}
+    if not binding_paths:
+        print("INFO: No jni_dynamic_bindings.txt paths discovered (optional).")
+        return bindings
 
-    for path in candidates:
-        if os.path.isfile(path):
-            bindings = {}
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split("|")
-                    if len(parts) >= 4:
-                        lib_name, java_method, signature, jni_symbol = parts[:4]
-                        # Find full path to this library
-                        lib_path = None
-                        for so in so_paths:
-                            if os.path.basename(so) == lib_name:
-                                lib_path = so
-                                break
-                        if lib_path:
-                            bindings[java_method] = (jni_symbol, lib_path)
-            print(f"INFO: Loaded {len(bindings)} JNI dynamic bindings from {path}")
-            return bindings
+    def upsert(java_method, jni_symbol, lib_path):
+        if not lib_path:
+            return
+        new_prio = lib_priority(lib_path)
+        prev_prio = bindings_priority.get(java_method)
+        if prev_prio is None or new_prio < prev_prio:
+            bindings[java_method] = (jni_symbol, lib_path)
+            bindings_priority[java_method] = new_prio
 
-    print("INFO: No JNI dynamic bindings file found (optional).")
-    return {}
+    for path in binding_paths:
+        n_before = len(bindings)
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("|")
+                if len(parts) < 4:
+                    continue
+                lib_name, java_method, _signature, jni_symbol = parts[:4]
+                lib_path = resolve_lib_for_jni_binding(lib_name, path, so_paths)
+                # extract_jni_bindings records the path basename at extraction time; images
+                # often ship the same ELF under a different name (e.g. shaded libnetty_epoll_*.jar.so
+                # vs libnetty_transport_native_epoll_x86_64.so).  Fall back to symbol ownership.
+                if lib_path is None and jni_symbol:
+                    lib_path = resolve_symbol_in_libs(jni_symbol, so_paths)
+                upsert(java_method, jni_symbol, lib_path)
+        added = len(bindings) - n_before
+        print(f"INFO: JNI dynamic bindings file {path} (+{added} new methods, {len(bindings)} total)")
 
-jni_dynamic_map = load_jni_dynamic_bindings(output_dir)
-
-# ----------------------------
-# Step 1.8: JFR RegisterNatives bindings (extracted via jfr_registernative_mapping.sh)
-# ----------------------------
-def load_jfr_registernatives(output_dir_path: str) -> dict:
-    """
-    Load JFR RegisterNatives mappings extracted from libjvm.so.
-    File format (from jfr_registernative_mapping.sh output):
-        N. jdk.jfr.internal.JVM.methodName(signature) → native_symbol
-    Returns: dict[java_method_without_sig] -> native_symbol
-        e.g. "jdk.jfr.internal.JVM.beginRecording" -> "jfr_begin_recording"
-    """
-    candidates = [
-        os.path.join(output_dir_path, "jfr_extracted_methods.txt"),
-        "jfr_extracted_methods.txt",
-    ]
-
-    # Pattern: " N. jdk.jfr.internal.JVM.methodName(sig) → native_symbol"
-    entry_rx = re.compile(
-        r'^\s*\d+\.\s+([A-Za-z0-9_.]+\.[A-Za-z_][A-Za-z0-9_]*)\(.*?\)\s*→\s*(\S+)'
-    )
-
-    for path in candidates:
-        if os.path.isfile(path):
-            bindings = {}
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    m = entry_rx.match(line)
-                    if m:
-                        java_method = m.group(1)  # e.g. jdk.jfr.internal.JVM.beginRecording
-                        native_sym = m.group(2)   # e.g. jfr_begin_recording
-                        bindings[java_method] = native_sym
-            print(f"INFO: Loaded {len(bindings)} JFR RegisterNatives bindings from {path}")
-            return bindings
-
-    print("INFO: No JFR RegisterNatives file found (optional). Run jfr_registernative_mapping.sh to generate.")
-    return {}
+    return bindings
 
 
-jfr_registernatives_map = load_jfr_registernatives(output_dir)
+jni_dynamic_binding_paths = discover_jni_dynamic_binding_paths(output_dir, PRIMARY_LIB_DIRS)
+jni_dynamic_map = load_jni_dynamic_bindings(jni_dynamic_binding_paths, so_paths)
+# SYM_INFER / extractor casing may differ from bytecode (e.g. Linuxsocket vs LinuxSocket).
+jni_dynamic_lower_index = {}
+for _fqcn in jni_dynamic_map:
+    jni_dynamic_lower_index.setdefault(_fqcn.lower(), _fqcn)
 
 # ----------------------------
 # Step 2: Source-based scan of JNINativeMethod tables (optional)
@@ -1258,17 +1542,105 @@ def scan_native_tables(src_root: str):
     return jvm_map, reg_map
 
 
-try:
-    jvm_method_map, registered_method_map = scan_native_tables(JVM_SRC_NORM)
-    if JVM_SRC_NORM and os.path.isdir(JVM_SRC_NORM):
-        print(f"INFO: Source scan found {len(jvm_method_map)} JVM_* entries "
-              f"and {len(registered_method_map)} registered entries.")
-    else:
-        shown = JVM_SRC_NORM or JVM_SRC or "<empty>"
-        print(f"INFO: JVM_SRC not set (or missing). Skipping source-based mapping. ({shown})")
-except Exception as e:
-    print(f"WARN: JVM source scan failed: {e}", file=sys.stderr)
-    jvm_method_map, registered_method_map = {}, {}
+# ----------------------------
+# Step 2.5: Extract RegisterNatives tables directly from the container's
+# libjvm.so binary using extract_registernatives_binary.py.
+#
+# The scan_native_tables() source-tree walk remains as a fallback — but
+# the preferred flow is:
+#   1) Run extract_registernatives_binary.py on LIBS_<IMG_SAFE>/libjvm.so
+#   2) Write output to OUTPUTS_<IMG_SAFE>/jvm_dynamic_mapping.txt
+#   3) Load the pipe-delimited mapping, intersecting native_symbol with
+#      what `nm libjvm.so` actually defines to drop phantom entries.
+# ----------------------------
+
+
+def load_jdk_mapping_file(mapping_file, libjvm_path):
+    """
+    Parse a pipe-delimited mapping file (extract_registernatives_binary.py
+    output) and return (jvm_map, registered_map) just like scan_native_tables().
+
+    Each row whose declared library is libjvm.so must have its native_symbol
+    actually defined in *libjvm_path* (verified via the nm-backed symbol
+    index).  Rows that reference symbols missing from this build are dropped
+    so we don't emit phantom JVM_* / registered hits for natives that simply
+    don't exist in the container's JVM.
+    """
+    jvm_map, reg_map = {}, {}
+    if not os.path.isfile(mapping_file):
+        return jvm_map, reg_map, 0, 0
+
+    libjvm_syms = set()
+    if libjvm_path and os.path.isfile(libjvm_path):
+        # The two-stage symbol index in get_library_symbol_index() only
+        # extends to local (non-exported) symbols when the dynamic cache is
+        # already warm.  Many HotSpot natives (WB_*, Unsafe_*, VectorSupport_*,
+        # PUH_*, jfr_*) are local-only, so we must call once to seed the
+        # dynamic set and a second time to fold in the full nm output.
+        get_library_symbol_index(libjvm_path, require_full=False)
+        libjvm_syms = get_library_symbol_index(libjvm_path, require_full=True)
+
+    kept = 0
+    dropped = 0
+    with open(mapping_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("|")
+            if len(parts) < 4:
+                continue
+            lib_name, java_method, _signature, native_sym = parts[:4]
+            if lib_name == "libjvm.so" and libjvm_syms and native_sym not in libjvm_syms:
+                dropped += 1
+                continue
+            if native_sym.startswith("JVM_"):
+                jvm_map.setdefault(java_method, native_sym)
+            else:
+                reg_map.setdefault(java_method, native_sym)
+            kept += 1
+    return jvm_map, reg_map, kept, dropped
+
+
+jvm_method_map, registered_method_map = {}, {}
+_jdk_mapping_loaded_from = None
+
+if libjvm_so:
+    _rn_so_files = [libjvm_so]
+    _rn_seen_real = {os.path.realpath(libjvm_so)}
+    for _p in so_paths:
+        _bn = os.path.basename(_p)
+        if _bn.startswith("libjava.so") or _bn.startswith("libnetty") or _bn.startswith("libjffi"):
+            _real = os.path.realpath(_p)
+            if _real not in _rn_seen_real:
+                _rn_seen_real.add(_real)
+                _rn_so_files.append(_p)
+    _rn_mapping_path = _auto_extract_registernatives_binary(_rn_so_files, output_dir)
+    if _rn_mapping_path:
+        jvm_method_map, registered_method_map, kept, dropped = (
+            load_jdk_mapping_file(_rn_mapping_path, libjvm_so)
+        )
+        print(
+            f"INFO: Loaded RegisterNatives binary mapping from {_rn_mapping_path}: "
+            f"{len(jvm_method_map)} JVM_* + {len(registered_method_map)} "
+            f"registered (kept {kept}, dropped {dropped} not in "
+            f"{os.path.basename(libjvm_so)})"
+        )
+        _jdk_mapping_loaded_from = _rn_mapping_path
+
+# Fallback: if binary extraction produced nothing, walk the source tree the old way.
+if not jvm_method_map and not registered_method_map:
+    try:
+        jvm_method_map, registered_method_map = scan_native_tables(JVM_SRC_NORM)
+        if JVM_SRC_NORM and os.path.isdir(JVM_SRC_NORM):
+            print(f"INFO: Source scan found {len(jvm_method_map)} JVM_* entries "
+                  f"and {len(registered_method_map)} registered entries.")
+        else:
+            shown = JVM_SRC_NORM or JVM_SRC or "<empty>"
+            print(f"INFO: JVM_SRC not set (or missing). Skipping source-based mapping. ({shown})")
+    except Exception as e:
+        print(f"WARN: JVM source scan failed: {e}", file=sys.stderr)
+        jvm_method_map, registered_method_map = {}, {}
 
 # ----------------------------
 # Step 3: Validate JVM_* symbols and prepare search library list
@@ -1281,7 +1653,8 @@ seed_libs = []
 if libjvm_so:
     seed_libs.append(libjvm_so)
 for p in so_paths:
-    if os.path.basename(p).startswith("libjava.so"):
+    bn = os.path.basename(p)
+    if bn.startswith("libjava.so") or bn.startswith("libjffi"):
         seed_libs.append(p)
 
 search_libs = collect_search_libs(seed_libs, LIB_DIRS)
@@ -1308,6 +1681,9 @@ PLATFORM_EXCLUDE_KEYWORDS = [
     "SCDynamicStoreConfig", # macOS Kerberos        (sun.security.krb5.SCDynamicStoreConfig.*)
     "WindowsDirectory.",    # Windows Lucene native (org.apache.lucene.store.WindowsDirectory.*)
     "_getGlyphImageFromWindows", # Windows font rendering (sun.font.FileFontStrike.*)
+    "tomcat.jni.Registry.",  # Windows Registry API  (org.apache.tomcat.jni.Registry.*)
+    "jline.WindowsTerminal.", # Windows terminal API  (jline.WindowsTerminal.*)
+    "log4j.nt.NTEventLogAppender.", # Windows NT Event Log (org.apache.log4j.nt.NTEventLogAppender.*)
 ]
 
 
@@ -1322,18 +1698,17 @@ def is_platform_excluded(method: str):
 # ----------------------------
 # Step 5: Classify each method
 # ----------------------------
-found_builtin    = 0
-found_aliased    = 0
 found_platform   = 0
-found_unavailable = 0
 not_found_count  = 0
-count_jni = 0
+count_jni_direct = 0  # Java_* exported JNI symbols (tag JNI)
+count_jni_mangled = 0  # subset of JNI that required escape decoding (_1, $, __, etc.)
+count_netty = 0  # NM fallback: unix.Socket / internal.tcnative / channel.epoll (tag NETTY)
 count_jvm = 0
 count_registered = 0
 count_intrinsic = 0
+# JNI_DYNAMIC (jni_dynamic_bindings.txt).
+count_jni_dynamic_bindings = 0
 
-bitshuffle_available = any(k.startswith("org.xerial.snappy.BitShuffleNative.") for k in method_to_jni.keys())
-zstd_generate_available = "com.github.luben.zstd.Zstd.generateSequences" in method_to_jni
 
 def try_bridge_resolve(original: str, sym: str, tag: str, libs: list, out_file):
     owner = resolve_symbol_in_libs(sym, libs)
@@ -1357,12 +1732,37 @@ def alias_tag(original: str, lookup: str) -> str:
     return f" (alias of {lookup})" if lookup != original else ""
 
 
+# Render the owning library so that anything inside the project tree
+# (e.g. /home/rupesh.punna/EchoTrace/LIBS_cassandra_5.0.6-bookworm/libnetty_...so)
+# becomes a project-relative path (LIBS_cassandra_5.0.6-bookworm/libnetty_...so),
+# while system / ldd-resolved libs (e.g. /lib/x86_64-linux-gnu/libpthread.so.0)
+# stay as bare basenames.
+def display_lib_path(owner) -> str:
+    if not owner:
+        return "libjvm.so"
+    abs_owner = os.path.abspath(owner)
+    try:
+        rel = os.path.relpath(abs_owner, PROJECT_ROOT)
+    except ValueError:
+        return os.path.basename(abs_owner)
+    if rel == ".." or rel.startswith(".." + os.sep):
+        return os.path.basename(abs_owner)
+    return rel
+
+
 def emit_result(out_file, owner: str, original: str, lookup: str, sym: str, tag: str, note: str = ""):
-    owner_base = os.path.basename(owner) if owner else "libjvm.so"
+    # Virtual classifications such as [INTRINSIC] have no real library and
+    # no native symbol (the JIT inlines them).  Emit them without a synthetic
+    # "libjvm.so:" prefix so they read as bare:
+    #     jdk.internal.misc.Unsafe.putFloatVolatile [INTRINSIC]
+    if owner is None and sym is None:
+        out_file.write(f"{original} [{tag}]{note}{alias_tag(original, lookup)}\n")
+        return 1 if lookup != original else 0
+    owner_display = display_lib_path(owner)
     if sym:
-        out_file.write(f"{owner_base}:{original} -> {sym} [{tag}]{note}{alias_tag(original, lookup)}\n")
+        out_file.write(f"{owner_display}:{original} -> {sym} [{tag}]{note}{alias_tag(original, lookup)}\n")
     else:
-        out_file.write(f"{owner_base}:{original} [{tag}]{note}{alias_tag(original, lookup)}\n")
+        out_file.write(f"{owner_display}:{original} [{tag}]{note}{alias_tag(original, lookup)}\n")
     return 1 if lookup != original else 0
 
 
@@ -1399,6 +1799,12 @@ with open(detailed_output_file, "w", encoding="utf-8") as out:
         lookup = UNSAFE_RENAMED.get(method, method)
         lookup = METHOD_ALIASES.get(lookup, lookup)
 
+        # Save lookup before zip/buffer JNI name variants so we can try both the
+        # canonical short name (inflateBytes) and the bytecode-native long name
+        # (inflateBytesBytes) against nm.  JDK 25+ libzip often exports only the
+        # long JNI symbols; older JDKs export the short ones.
+        pre_zip_variants_lookup = lookup
+
         # Apply JDK 8 ↔ JDK 9+ compatibility mappings in priority order:
         # 1. Method name variants (bytecode-level differences)
         # 2. JDK method renames (package + method name changes)
@@ -1408,161 +1814,190 @@ with open(detailed_output_file, "w", encoding="utf-8") as out:
         lookup = JDK8_JDK9_METHOD_RENAMES.get(lookup, lookup)
         lookup = JDK8_JDK9_PACKAGE_RENAMES.get(lookup, lookup)
         lookup = HAWTJNI_SWT_CALLBACK_MAPPING.get(lookup, lookup)
+        compat_lookup_candidates = []
+        for _cand in (original, lookup):
+            if _cand not in compat_lookup_candidates:
+                compat_lookup_candidates.append(_cand)
+        reverse_unsafe_lookup = SUN_UNSAFE_TO_JDK_INTERNAL.get(lookup)
+        if reverse_unsafe_lookup and reverse_unsafe_lookup not in compat_lookup_candidates:
+            compat_lookup_candidates.append(reverse_unsafe_lookup)
 
         # ----- 1) JNI direct hit (Java_* symbols) -----
-        if lookup in method_to_jni:
-            jni_sym, so_path = method_to_jni[lookup][0]
-            if lookup == "org.hyperic.sigar.Sigar.getFileSystemListNative":
+        jni_lookup_candidates = [lookup]
+        if lookup != pre_zip_variants_lookup:
+            jni_lookup_candidates.append(pre_zip_variants_lookup)
+
+        jni_map_key = None
+        for cand in jni_lookup_candidates:
+            if cand in method_to_jni:
+                jni_map_key = cand
+                break
+
+        if jni_map_key is not None:
+            jni_sym, so_path = method_to_jni[jni_map_key][0]
+            if jni_map_key == "org.hyperic.sigar.Sigar.getFileSystemListNative":
                 # #region agent log
                 debug_log("sigar-jni-direct", "H2", "direct JNI mapping found for Sigar.getFileSystemListNative", {
-                    "lookup": lookup,
+                    "lookup": jni_map_key,
                     "jniSymbol": jni_sym,
                     "owner": so_path,
                 })
                 # #endregion
-            found_aliased += emit_result(out, so_path, original, lookup, jni_sym, "JNI")
-            count_jni += 1
+            emit_result(out, so_path, original, jni_map_key, jni_sym, "JNI")
+            count_jni_direct += 1
+            if is_mangled_jni(jni_sym):
+                count_jni_mangled += 1
             continue
 
-        # ----- 1.4) tcnative SSL/SSLContext -> documented OpenSSL function name -----
-        # Source: netty.io xref + chromium netty-tcnative mirror. Only fires when
-        # the javadoc explicitly names an OpenSSL function; unmapped methods fall
-        # through to the existing paths unchanged.
-        tcnative_hit = None
-        for _prefix, _class_map in TCNATIVE_CLASS_MAPS:
-            if original.startswith(_prefix):
-                method_name = original.rsplit(".", 1)[-1]
-                # #region agent log
-                debug_log("cassandra-netty-tcnative", "H1", "entered tcnative lookup branch", {
-                    "original": original,
-                    "classPrefix": _prefix,
-                    "methodName": method_name,
-                    "dictHasExact": method_name in _class_map,
-                })
-                # #endregion
-                tcnative_hit = _class_map.get(method_name)
-                # Netty tcnative wrappers commonly suffix native entrypoints with "0"
-                # while docs/mapping keys use names without the suffix.
-                if tcnative_hit is None and method_name.endswith("0"):
-                    tcnative_hit = _class_map.get(method_name[:-1])
-                    # #region agent log
-                    debug_log("cassandra-netty-tcnative", "H2", "applied trailing-zero fallback", {
-                        "original": original,
-                        "methodName": method_name,
-                        "fallbackMethodName": method_name[:-1],
-                        "fallbackHit": tcnative_hit,
-                    })
-                    # #endregion
+        # ----- 1.2) JNI Dynamic Bindings (RegisterNatives tables from extract_jni_bindings.py) -----
+        jni_dyn_key = None
+        for cand in iter_jni_dynamic_lookup_keys(original, lookup, shaded_netty_prefixes):
+            if cand in jni_dynamic_map:
+                jni_dyn_key = cand
                 break
-        if tcnative_hit:
-            # #region agent log
-            debug_log("cassandra-netty-tcnative", "H3", "resolved via tcnative openssl map", {
-                "original": original,
-                "resolvedSymbol": tcnative_hit,
-            })
-            # #endregion
-            out.write(f"{original} -> {tcnative_hit} [TCNATIVE_OPENSSL]\n")
-            count_jni += 1
-            continue
-        elif original.startswith("io.netty.internal.tcnative."):
-            # #region agent log
-            debug_log("cassandra-netty-tcnative", "H4", "tcnative method unresolved in dictionary", {
-                "original": original,
-                "methodName": original.rsplit(".", 1)[-1],
-            })
-            # #endregion
-
-        # ----- 1.5) Netty exact mapping -----
-        if original in netty_method_map:
-            netty_sym, so_path = netty_method_map[original]
-            emit_result(out, so_path, original, original, netty_sym, "NETTY")
-            count_jni += 1
-            continue
-
-        # ----- 1.6) Netty fuzzy matching -----
-        if original.startswith(_all_netty_prefixes):
-            result = match_netty_method(original, netty_method_map, shaded_netty_prefixes)
-            if result:
-                netty_sym, so_path = result
-                emit_result(out, so_path, original, original, netty_sym, "NETTY_FUZZY")
-                count_jni += 1
-                continue
-
-        # ----- 1.7) JNI Dynamic Bindings (bytecode-extracted) -----
-        if original in jni_dynamic_map or lookup in jni_dynamic_map:
-            # Try both original and lookup (for aliased methods)
-            jni_dyn_key = original if original in jni_dynamic_map else lookup
+            alt = jni_dynamic_lower_index.get(cand.lower())
+            if alt is not None:
+                jni_dyn_key = alt
+                break
+        if jni_dyn_key is not None:
             jni_dyn_sym, so_path = jni_dynamic_map[jni_dyn_key]
-            found_aliased += emit_result(out, so_path, original, jni_dyn_key, jni_dyn_sym, "JNI_DYNAMIC")
-            count_jni += 1
+            emit_result(out, so_path, original, jni_dyn_key, jni_dyn_sym, "JNI_DYNAMIC")
+            count_jni_dynamic_bindings += 1
+            continue
+
+        # ----- 1.3) Netty unix.Socket — nm fallback for dynamically registered JNI ---
+        sock_nm = try_netty_unix_socket_nm_fallback(original, lookup, shaded_netty_prefixes, search_libs)
+        if sock_nm:
+            so_path, sym, matched_java = sock_nm
+            emit_result(out, so_path, original, matched_java, sym, "NETTY")
+            count_netty += 1
+            continue
+
+        # ----- 1.4) Netty internal.tcnative — nm fallback (netty_internal_tcnative_Class_method) -----
+        tcn_nm = try_netty_internal_tcnative_nm_fallback(original, lookup, shaded_netty_prefixes, search_libs)
+        if tcn_nm:
+            so_path, sym, matched_java = tcn_nm
+            emit_result(out, so_path, original, matched_java, sym, "NETTY")
+            count_netty += 1
+            continue
+
+        # ----- 1.5) Netty channel.epoll — nm fallback (netty_epoll_<classtoken>_method) -----
+        ep_nm = try_netty_channel_epoll_nm_fallback(original, lookup, shaded_netty_prefixes, search_libs)
+        if ep_nm:
+            so_path, sym, matched_java = ep_nm
+            emit_result(out, so_path, original, matched_java, sym, "NETTY")
+            count_netty += 1
             continue
 
         # ----- 2) JVM_* via source tables -----
-        jvm_sym = jvm_method_map.get(lookup)
-        if not jvm_sym:
-            match = re.match(r'^(.+?)([a-z][a-zA-Z0-9_]*)\(', lookup)
+        jvm_sym = None
+        jvm_lookup = lookup
+        for cand in compat_lookup_candidates:
+            jvm_sym = jvm_method_map.get(cand)
+            if jvm_sym:
+                jvm_lookup = cand
+                break
+            match = re.match(r'^(.+?)([a-z][a-zA-Z0-9_]*)\(', cand)
             if match:
                 lookup_key = f"{match.group(1)}.{match.group(2)}"
                 jvm_sym = jvm_method_map.get(lookup_key)
+                if jvm_sym:
+                    jvm_lookup = lookup_key
+                    break
 
         if jvm_sym:
             tag = "JVM"
             if libjvm_so and (jvm_sym not in available_jvm_symbols):
                 tag = "JVM? NOT_IN_THIS_LIB"
-            found_aliased += emit_result(out, None, original, lookup, jvm_sym, tag)
+            emit_result(out, libjvm_so, original, jvm_lookup, jvm_sym, tag)
             count_jvm += 1
             continue
 
         # ----- 2.5) JVM built-in natives (well-known JVM_* functions) -----
-        builtin_sym = JVM_BUILTIN_NATIVES.get(lookup)
+        builtin_sym = None
+        builtin_lookup = lookup
+        for cand in compat_lookup_candidates:
+            builtin_sym = JVM_BUILTIN_NATIVES.get(cand)
+            if builtin_sym:
+                builtin_lookup = cand
+                break
         if builtin_sym:
-            tag = "JVM_BUILTIN"
+            tag = "JVM"
             if libjvm_so and (builtin_sym not in available_jvm_symbols):
-                tag = "JVM_BUILTIN? NOT_IN_THIS_LIB"
-            found_aliased += emit_result(out, None, original, lookup, builtin_sym, tag)
+                tag = "JVM? NOT_IN_THIS_LIB"
+            emit_result(out, libjvm_so, original, builtin_lookup, builtin_sym, tag)
             count_jvm += 1
-            found_builtin += 1
             continue
 
         # ----- 3) Registered natives (non-JVM) via source tables -----
-        reg_sym = registered_method_map.get(lookup)
+        reg_lookup = lookup
+        reg_sym = None
+        for cand in compat_lookup_candidates:
+            reg_sym = registered_method_map.get(cand)
+            if reg_sym:
+                reg_lookup = cand
+                break
+        if not reg_sym:
+            # Try stripping shaded prefixes (e.g. org.apache.storm.shade.io.netty -> io.netty)
+            for _sp in shaded_netty_prefixes:
+                if lookup.startswith(_sp + "."):
+                    _unshaded = "io.netty." + lookup[len(_sp) + 1:]
+                    reg_sym = registered_method_map.get(_unshaded)
+                    if reg_sym:
+                        reg_lookup = _unshaded
+                        break
+        if not reg_sym:
+            # Netty cross-class alias: epoll.NativeStaticallyReferencedJniMethods declares
+            # limit methods (ssizeMax, iovMax, etc.) that are registered under
+            # unix.LimitsStaticallyReferencedJniMethods at runtime, and vice versa.
+            _epoll_nsrjm = "io.netty.channel.epoll.NativeStaticallyReferencedJniMethods."
+            _unix_lsrjm = "io.netty.channel.unix.LimitsStaticallyReferencedJniMethods."
+            _unshaded_lookup = lookup
+            for _sp in shaded_netty_prefixes:
+                if _unshaded_lookup.startswith(_sp + "."):
+                    _unshaded_lookup = "io.netty." + _unshaded_lookup[len(_sp) + 1:]
+                    break
+            if _unshaded_lookup.startswith(_epoll_nsrjm):
+                _method = _unshaded_lookup[len(_epoll_nsrjm):]
+                reg_sym = registered_method_map.get(_unix_lsrjm + _method)
+                if reg_sym:
+                    reg_lookup = _unix_lsrjm + _method
+            elif _unshaded_lookup.startswith(_unix_lsrjm):
+                _method = _unshaded_lookup[len(_unix_lsrjm):]
+                reg_sym = registered_method_map.get(_epoll_nsrjm + _method)
+                if reg_sym:
+                    reg_lookup = _epoll_nsrjm + _method
         if reg_sym:
             owner = resolve_symbol_in_libs(reg_sym, search_libs)
             if owner:
-                found_aliased += emit_result(out, owner, original, lookup, reg_sym, "REGISTERED")
+                emit_result(out, owner, original, reg_lookup, reg_sym, "REGISTERED")
             else:
-                fence_result = resolve_fence_fallback(lookup, search_libs)
+                fence_result = resolve_fence_fallback(reg_lookup, search_libs)
                 if fence_result:
                     full_owner, full_sym = fence_result
-                    found_aliased += emit_result(
+                    emit_result(
                         out,
                         full_owner,
                         original,
-                        lookup,
+                        reg_lookup,
                         full_sym,
                         "REGISTERED_FENCE_FALLBACK",
                         note=f" (registered as {reg_sym})",
                     )
                     count_registered += 1
                     continue
-                out.write(f"{original} -> {reg_sym} [REGISTERED? UNRESOLVED]{alias_tag(original, lookup)}\n")
+                out.write(f"{original} -> {reg_sym} [REGISTERED? UNRESOLVED]{alias_tag(original, reg_lookup)}\n")
             count_registered += 1
             continue
 
 
-
-        # ----- 4) JVM intrinsic (inlined by JIT, no .so symbol) -----
-        if lookup in intrinsic_methods:
-            found_aliased += emit_result(out, None, original, lookup, None, "INTRINSIC")
-            count_intrinsic += 1
-            continue
 
         # ----- 4.2) Unsafe local-symbol fallback in libjvm -----
         unsafe_local_sym = UNSAFE_LOCAL_FALLBACKS.get(lookup)
         if unsafe_local_sym:
             owner = resolve_symbol_in_libs(unsafe_local_sym, [libjvm_so] if libjvm_so else search_libs)
             if owner:
-                found_aliased += emit_result(out, owner, original, lookup, unsafe_local_sym, "UNSAFE_LOCAL_SYMBOL")
+                emit_result(out, owner, original, lookup, unsafe_local_sym, "UNSAFE_LOCAL_SYMBOL")
                 count_registered += 1
                 continue
 
@@ -1596,18 +2031,6 @@ with open(detailed_output_file, "w", encoding="utf-8") as out:
                 out.write(f"{original} -> {source_jni_sym} [SOURCE_JNI_BRIDGE? UNRESOLVED]\n")
             continue
 
-        # ----- 4.57) HotSpot JFR RegisterNatives bridge (jdk.jfr.internal.JVM -> jfr_*) -----
-        jfr_sym = jfr_registernatives_map.get(lookup) or jfr_registernatives_map.get(original)
-        if jfr_sym:
-            owner = resolve_symbol_in_libs(jfr_sym, [libjvm_so] if libjvm_so else search_libs)
-            if owner:
-                found_aliased += emit_result(out, owner, original, lookup, jfr_sym, "JFR_REGISTERED")
-            else:
-                # jfr_* symbols are local in libjvm.so, libjvm always owns them
-                emit_result(out, libjvm_so or "libjvm.so", original, lookup, jfr_sym, "JFR_REGISTERED")
-            count_registered += 1
-            continue
-
         # ----- 4.6) Sigar gather/list bridge mapping -----
         sigar_sym = SIGAR_LIST_BRIDGES.get(original)
         if sigar_sym:
@@ -1629,28 +2052,6 @@ with open(detailed_output_file, "w", encoding="utf-8") as out:
                 count_registered += 1
             continue
 
-        # ----- 4.7) Deterministic unavailable-in-build classifications -----
-        if original.startswith("software.chronicle.enterprise.internals.impl.NativeAffinity.") or original == "net.openhft.ticker.impl.JNIClock.rdtsc0":
-            if not has_chronicle_native_lib:
-                out.write(f"{original}: LIB_NOT_PRESENT_IN_SCAN [CHRONICLE_NATIVE]\n")
-                found_unavailable += 1
-                continue
-
-        if original.startswith("org.apache.commons.daemon.support.DaemonLoader.") and not has_commons_daemon_lib:
-            out.write(f"{original}: LIB_NOT_PRESENT_IN_SCAN [COMMONS_DAEMON_NATIVE]\n")
-            found_unavailable += 1
-            continue
-
-        if original.startswith("org.xerial.snappy.BitShuffleNative.") and not bitshuffle_available:
-            out.write(f"{original}: NATIVE_METHOD_NOT_IN_THIS_BUILD [SNAPPY_BITSHUFFLE]\n")
-            found_unavailable += 1
-            continue
-
-        if original == "com.github.luben.zstd.Zstd.generateSequences" and not zstd_generate_available:
-            out.write(f"{original}: NATIVE_METHOD_NOT_IN_THIS_BUILD [ZSTD_JNI]\n")
-            found_unavailable += 1
-            continue
-
         # ----- 5) Not found -----
         if original == "org.hyperic.sigar.FileSystem.gather":
             # #region agent log
@@ -1663,24 +2064,62 @@ with open(detailed_output_file, "w", encoding="utf-8") as out:
         not_found_count += 1
 
 # ----------------------------
+# Post-loop: Apply intrinsic classification to NOT_FOUND methods
+# ----------------------------
+# Intrinsic is applied AFTER all mapping strategies have been exhausted.
+# This ensures methods that can be resolved via RegisterNatives, JNI bridges,
+# etc. are mapped to their concrete .so symbols first.
+if intrinsic_methods:
+    with open(detailed_output_file, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    new_lines = []
+    for line in lines:
+        if line.rstrip().endswith(": NOT_FOUND_IN_LIBS"):
+            method_name = line.split(":")[0].strip()
+            lookup_name = UNSAFE_RENAMED.get(method_name, method_name)
+            lookup_name = METHOD_ALIASES.get(lookup_name, lookup_name)
+            if lookup_name in intrinsic_methods or method_name in intrinsic_methods:
+                new_lines.append(f"{method_name} [INTRINSIC]\n")
+                count_intrinsic += 1
+                not_found_count -= 1
+                continue
+        new_lines.append(line)
+    with open(detailed_output_file, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+
+# ----------------------------
 # Summary
 # ----------------------------
 total = len(methods)
 found_total = total - not_found_count - found_platform
 
+# Two-tier taxonomy by *registration mechanism*:
+#   JNI          = static Java_* exports resolved by dlsym (no RegisterNatives needed)
+#   JNI_DYNAMIC  = everything wired up at runtime via (*env)->RegisterNatives()
+#                  Split inside it is purely by C target-symbol prefix:
+#                    JVM_         -> published HotSpot ABI (jvm.h: JVM_StartThread, ...)
+#                    Registered_  -> any other C target. This is the union of:
+#                                     * the existing "Registered" bucket (Unsafe_*/MHN_*/
+#                                       Perf_*/jfr_*/Sigar/libc/JNI bridges, fence fallback,
+#                                       UNSAFE_LOCAL_SYMBOL)
+#                                     * the existing "JNI Dyn" bucket (JNI_DYNAMIC tags from
+#                                       extract_jni_bindings.py: Netty/tcnative/zstd/...)
+#                                     * the existing "Netty" bucket (NM-fallback hits)
+count_static_jni        = count_jni_direct
+count_jni_dyn_jvm       = count_jvm
+count_jni_dyn_registered = count_registered + count_jni_dynamic_bindings + count_netty
+count_jni_dyn_total     = count_jni_dyn_jvm + count_jni_dyn_registered
+
 print(f"\n=== Classification Summary ===")
 print(f"Total methods:        {total}")
 print(f"Resolved:             {found_total}  ({100*found_total//total}%)")
-print(f"  JNI / Netty:        {count_jni}")
-print(f"  JVM_* (source):     {count_jvm}")
-print(f"  Registered:         {count_registered}")
-print(f"  Intrinsic (JIT):    {count_intrinsic}")
-if found_unavailable:
-    print(f"  Unavailable build:  {found_unavailable}")
-if found_builtin:
-    print(f"  (incl. builtins):   {found_builtin}")
-if found_aliased:
-    print(f"  (via Unsafe alias): {found_aliased}")
+print(f"  JNI:                 {count_static_jni}     ")
+print(f"    Generic Java_:     {count_static_jni - count_jni_mangled}")
+print(f"    Partial (_1/$/__): {count_jni_mangled}")
+print(f"  JNI_DYNAMIC:         {count_jni_dyn_total}     ")
+print(f"    JVM_:              {count_jni_dyn_jvm}     (target symbol starts with JVM_)")
+print(f"    Registered_:       {count_jni_dyn_registered}     (Registered_libjvm + JFR + Netty)")
+print(f"  Intrinsic (JIT):     {count_intrinsic}")
 print(f"Platform-excluded:    {found_platform}")
 print(f"NOT_FOUND_IN_LIBS:    {not_found_count}")
 print(f"\nOutput: {detailed_output_file}")
