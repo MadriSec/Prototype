@@ -1,6 +1,0 @@
-_start
-__libc_start_main
-main
-func_array1
-func_array2
-call_size_func

@@ -1,3 +1,0 @@
-syscall_fchown 1125 module-final.so fchown 93
-syscall_getgid 110f module-final.so getgid 104
-syscall_mkdir 10f9 module-final.so mkdir 83
