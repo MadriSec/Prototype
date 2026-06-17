@@ -152,9 +152,7 @@ Not all file opens mean the file is loaded. Sysdig events are ranked by confiden
 
 Once sysdig identifies which files a container loads, we extract them for offline analysis:
 
-```bash
-./extract_all_from_container.sh <container_id> [--output-dir <dir>]
-```
+
 
 This orchestrates:
 
@@ -173,10 +171,6 @@ outputs_<container>/
     .build-id/
     usr/lib/debug/
 ```
-
-Toolchain scripts for targeted extraction:
-- `toolchain_libs.sh` -- extract only libraries
-- `toolchain_jars_bin.sh` -- extract JARs and binaries
 
 ---
 
@@ -264,16 +258,26 @@ java.lang.Thread.start0  → JVM_StartThread (in libjvm.so)
 
 When `JVM_SRC` points to an OpenJDK source tree, the mapper parses `JNINativeMethod` registration tables from C source files to learn these mappings.
 
-**3. Transitive dependency resolution (`ldd`)**
+**3. Registered Native Mappign **
 
-When a symbol isn't found in any directly extracted library, the mapper resolves transitive dependencies via `ldd` to find which `.so` actually defines a target symbol.
+Echotrace also resolves JNI methods that are registered dynamically through RegisterNatives, rather than exported with standard Java_* JNI names. For these cases, SysJava analyzes the native libraries extracted from the container, such as libjvm.so, libjava.so, Netty native libraries, and JFFI libraries, and recovers JNINativeMethod tables directly from the binaries. Each recovered table maps a Java method name and descriptor to a native function pointer; SysJava resolves that pointer to a concrete native symbol and library using ELF metadata and symbol tables. This lets SysJava handle JDK- and library-specific native bindings without relying on host JDK source code or hardcoded JDK-version assumptions.
 
-### Running the Mapper
 
-```bash
-LIBS_DIR=./LIBS_cassandra METHODS_FILE=native_methods.txt OUTPUTS_DIR=./outputs_cassandra \
-  python3 mapped_updated.py
+For example, a JDK method may be registered like this:
+
+```c
+static JNINativeMethod methods[] = {
+  { "start0", "()V", (void *)&JVM_StartThread }
+};
 ```
+
+SysJava recovers this mapping as:
+
+```text
+java.lang.Thread.start0()V -> JVM_StartThread -> libjvm.so
+```
+
+This allows SysJava to resolve dynamically registered JNI methods from the container’s actual JDK and native libraries, instead of relying on host JDK source code or hardcoded JDK-version assumptions.
 
 **Output:** `mapped_method_syscalls.txt`
 ```
