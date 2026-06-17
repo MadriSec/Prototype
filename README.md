@@ -425,12 +425,12 @@ outputs
 
 ### Prerequisites
 
-EchoTrace is intended for a Linux x86-64 host that can run Docker containers and analyze x86-64 ELF binaries. The current SysPart submodule has been tested upstream on Ubuntu 22.04; other recent Linux distributions may work, but package names can differ.
+EchoTrace is intended for a Linux x86-64 host that can run Docker containers and analyze x86-64 ELF binaries. Dynamic capture uses Sysdig with the modern eBPF backend, which requires Linux kernel 5.8 or newer. The current SysPart submodule has been tested upstream on Ubuntu 22.04; other recent Linux distributions may work, but package names can differ.
 
 Host tools used by the pipeline:
 
 - Docker CLI and daemon access for `docker ps`, `docker inspect`, `docker exec`, `docker cp`, `docker stop`, and `docker start`
-- Sysdig with modern eBPF support for dynamic capture; the scripts run `sudo sysdig --modern-bpf`
+- Sysdig with modern eBPF support for dynamic capture; the scripts run `sudo sysdig --modern-bpf`, which requires Linux kernel >= 5.8
 - Java JDK 11+ with `java` and `javac` on `PATH`
 - Maven 3.6+
 - Python 3.8+
@@ -438,7 +438,7 @@ Host tools used by the pipeline:
 - ELF/native utilities: `binutils` (`nm`, `objdump`, `readelf`), `file`, `ldd`, `unzip`, `make`, `g++`, `gdb`, `libreadline-dev`, `libunwind-dev`, and debug libc/libstdc++ packages for better SysPart results
 - SysPart submodule checked out at `SysPartCode/` for binary analysis ([optimizations branch](https://github.com/vidyalakshmir/SysPartCode/tree/optimizations))
 
-On Ubuntu 22.04, a typical setup is:
+On Ubuntu 22.04 or another host with Linux kernel >= 5.8, a typical setup is:
 
 ```bash
 sudo apt-get update
