@@ -174,6 +174,12 @@ After bytecode analysis, EchoTrace maps Java native methods and binding sites to
 
 ### How Mapping Works
 
+`mapped_updated.py` combines several sources of evidence — matching `Java_*` exports, recovering `RegisterNatives` tables from binaries, and resolving JNA/JNR/FFM binding sites — to tag each method with a library, native symbol, and resolution type:
+
+<p align="center">
+  <img src="docs/mapping-native-methods.svg" alt="Mapping native methods to libraries: JNI plus JNA/FFI native methods from bytecode analysis, with the container's .so files and binaries, feed mapped_updated.py, which resolves methods by JNI symbol match (JNI), RegisterNatives recovery (JNI_DYNAMIC), or JNA/JNR/FFM binding; output records carry a library, c-symbol and tag and feed binary analysis with SysPart." width="760">
+</p>
+
 `mapped_updated.py` combines several sources of evidence.
 
 **1. Standard JNI symbol matching**
