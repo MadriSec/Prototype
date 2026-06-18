@@ -124,6 +124,12 @@ Dynamic capture tells EchoTrace what files were loaded; bytecode analysis tells 
 
 ### How We Find Them
 
+Two input sources — application JARs and the container's own JDK runtime — are scanned once in a shared ASM/SootUp context, which dispatches to a dedicated detector per native-interface mechanism. Their hits merge into the native-method and binding records consumed by native mapping:
+
+<p align="center">
+  <img src="docs/finding-native-methods.svg" alt="Bytecode analysis stage: application JARs and container-JDK runtime JARs feed a shared ASM and SootUp scanner that dispatches to six per-mechanism detectors (JNI, JNA interface, JNA dynamic, JNA direct, FFM, JNR/JFFI); their merged records flow into native mapping." width="760">
+</p>
+
 EchoTrace analyzes:
 
 ```
