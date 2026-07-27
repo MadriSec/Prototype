@@ -4,17 +4,17 @@ Script: merge_all_syscalls.py
 Description: Merge syscalls from binary and library analysis directories and generate seccomp profile
 
 This script:
-  1. Parses syscalls_BIN_<IMG_SAFE>/<binary>/syscalls.txt files
+  1. Parses syscalls_BIN_<IMG_NAME>/<binary>/syscalls.txt files
   2. Reports empty syscalls.txt files in binaries
   3. Creates binary_syscalls.txt with unique syscalls from all binaries
-  4. Parses syscalls_LIBS_<IMG_SAFE>/<library>/syscalls.txt files
+  4. Parses syscalls_LIBS_<IMG_NAME>/<library>/syscalls.txt files
   5. Reports empty syscalls.txt files in libraries
   6. Creates library_syscalls.txt with unique syscalls from all libraries
   7. Merges with runc.txt default whitelist (if present)
-  8. Creates <IMG_SAFE>.txt with combined syscalls (no duplicates)
-  9. Generates <IMG_SAFE>.json seccomp profile from combined syscalls
+  8. Creates <IMG_NAME>.txt with combined syscalls (no duplicates)
+  9. Generates <IMG_NAME>.json seccomp profile from combined syscalls
 
-Usage: ./merge_all_syscalls.py <IMG_SAFE>
+Usage: ./merge_all_syscalls.py <IMG_NAME>
 
 Example:
   ./merge_all_syscalls.py jetty_9.4.58-jdk8-amazoncorretto
@@ -150,25 +150,25 @@ def write_seccomp_profile(filepath: Path, syscalls: Set[str]):
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: ./merge_all_syscalls.py <IMG_SAFE>")
+        print("Usage: ./merge_all_syscalls.py <IMG_NAME>")
         print("")
         print("Example:")
         print("  ./merge_all_syscalls.py jetty_9.4.58-jdk8-amazoncorretto")
         sys.exit(1)
 
-    img_safe = sys.argv[1]
+    img_name = sys.argv[1]
     script_dir = Path(__file__).resolve().parent
     project_root = script_dir.parent if script_dir.name == "scripts" else script_dir
 
     print("╔══════════════════════════════════════════════════════════════╗")
     print("║              Syscall Merge & Analysis Tool                   ║")
     print("╚══════════════════════════════════════════════════════════════╝")
-    print(f"\nIMG_SAFE: {img_safe}")
+    print(f"\nIMG_NAME: {img_name}")
     print(f"Working directory: {project_root}")
 
     # Define directories
-    bin_dir = project_root / f"syscalls_BIN_{img_safe}"
-    libs_dir = project_root / f"syscalls_output_{img_safe}"
+    bin_dir = project_root / f"syscalls_BIN_{img_name}"
+    libs_dir = project_root / f"syscalls_output_{img_name}"
 
     # =========================================================================
     # STEP 1: Process Binary Syscalls
@@ -266,8 +266,8 @@ def main():
     print("")
 
     if combined_syscalls:
-        # Write to syscalls_LIBS_<IMG_SAFE>/<IMG_SAFE>.txt
-        combined_output = libs_dir / f"{img_safe}.txt"
+        # Write to syscalls_LIBS_<IMG_NAME>/<IMG_NAME>.txt
+        combined_output = libs_dir / f"{img_name}.txt"
         write_syscalls_file(combined_output, combined_syscalls)
     else:
         print("  ⚠ No syscalls found, skipping combined file")
@@ -280,8 +280,8 @@ def main():
     print("="*70)
 
     if combined_syscalls:
-        # Create seccomp profile in syscalls_LIBS_<IMG_SAFE>/<IMG_SAFE>.json
-        seccomp_output = libs_dir / f"{img_safe}.json"
+        # Create seccomp profile in syscalls_LIBS_<IMG_NAME>/<IMG_NAME>.json
+        seccomp_output = libs_dir / f"{img_name}.json"
         print(f"\nGenerating seccomp profile from combined syscalls...")
         write_seccomp_profile(seccomp_output, combined_syscalls)
         print(f"\nSeccomp profile configuration:")
@@ -332,8 +332,8 @@ def main():
     if library_syscalls:
         print(f"  - {libs_dir / 'library_syscalls.txt'} (text)")
     if combined_syscalls:
-        print(f"  - {libs_dir / f'{img_safe}.txt'} (text)")
-        print(f"  - {libs_dir / f'{img_safe}.json'} (seccomp profile)")
+        print(f"  - {libs_dir / f'{img_name}.txt'} (text)")
+        print(f"  - {libs_dir / f'{img_name}.json'} (seccomp profile)")
 
     print("")
 

@@ -6,20 +6,20 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 if [ $# -lt 1 ]; then
   echo "Usage: $0 <container_id_or_name>" >&2
-  echo "Required env: IMG_SAFE" >&2
+  echo "Required env: IMG_NAME" >&2
   exit 1
 fi
 
 CONTAINER_ID="$1"
 
-if [ -z "${IMG_SAFE:-}" ]; then
-  echo "ERROR: IMG_SAFE is required" >&2
+if [ -z "${IMG_NAME:-}" ]; then
+  echo "ERROR: IMG_NAME is required" >&2
   exit 1
 fi
 
-JARFILES_DIR="${JARFILES_DIR:-${PROJECT_ROOT}/JARFILES_${IMG_SAFE}}"
-LIBS_DIR="${LIBS_DIR:-${PROJECT_ROOT}/LIBS_${IMG_SAFE}}"
-RUNTIME_DIR="${RUNTIME_DIR:-${PROJECT_ROOT}/RUNTIME_${IMG_SAFE}}"
+JARFILES_DIR="${JARFILES_DIR:-${PROJECT_ROOT}/JARFILES_${IMG_NAME}}"
+LIBS_DIR="${LIBS_DIR:-${PROJECT_ROOT}/LIBS_${IMG_NAME}}"
+RUNTIME_DIR="${RUNTIME_DIR:-${PROJECT_ROOT}/RUNTIME_${IMG_NAME}}"
 
 mkdir -p "$JARFILES_DIR" "$LIBS_DIR" "$RUNTIME_DIR"
 
@@ -34,7 +34,7 @@ python3 "${SCRIPT_DIR}/extract_container_jdk.py" \
   "$CONTAINER_ID" \
   --libs \
   --force \
-  --out-name "$IMG_SAFE" \
+  --out-name "$IMG_NAME" \
   --runtime-dir "$RUNTIME_DIR" \
   --libs-dir "$LIBS_DIR"
 

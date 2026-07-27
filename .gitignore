@@ -14,3 +14,6 @@ syscalls_LIBS_*/
 
 # Local symlink/output scratch
 outputs
+
+# SysPart submodule (built in place; build output is not tracked)
+SysPartCode/

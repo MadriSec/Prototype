@@ -3,20 +3,20 @@ set -e  # stop if any command fails
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-#IMG_SAFE=cassandra_3.0.29 \
+#IMG_NAME=cassandra_3.0.29 \
 #LIBS_DIR=${SCRIPT_DIR}/LIBS_cassandra_3.0.29 \
 #  bash run_analysis.sh
 ANALYSIS_MODE="${ANALYSIS_MODE:-FULL_BYTECODE}"
 
-# IMG_SAFE is required — all per-image directories derive from it
-if [ -z "${IMG_SAFE:-}" ]; then
-    echo "ERROR: IMG_SAFE is required. Example: IMG_SAFE=cassandra_3.0.29 bash run_analysis.sh"
+# IMG_NAME is required — all per-image directories derive from it
+if [ -z "${IMG_NAME:-}" ]; then
+    echo "ERROR: IMG_NAME is required. Example: IMG_NAME=cassandra_3.0.29 bash run_analysis.sh"
     exit 1
 fi
 
-LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-${PROJECT_ROOT}/LIBS_${IMG_SAFE}}}"
-OUTPUTS_BASE_DIR="${OUTPUTS_DIR:-${PROJECT_ROOT}/outputs_${IMG_SAFE}}"
-RUNTIME_BASE_DIR="${RUNTIME_DIR:-${PROJECT_ROOT}/RUNTIME_${IMG_SAFE}}"
+LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-${PROJECT_ROOT}/LIBS_${IMG_NAME}}}"
+OUTPUTS_BASE_DIR="${OUTPUTS_DIR:-${PROJECT_ROOT}/outputs_${IMG_NAME}}"
+RUNTIME_BASE_DIR="${RUNTIME_DIR:-${PROJECT_ROOT}/RUNTIME_${IMG_NAME}}"
 mkdir -p "$OUTPUTS_BASE_DIR"
 
 if [ "$ANALYSIS_MODE" = "FULL_BYTECODE" ]; then
@@ -30,7 +30,7 @@ if [ "$ANALYSIS_MODE" = "FULL_BYTECODE" ]; then
         echo "============================================================"
         echo " STEP 1: Running bytecode analysis"
         echo "============================================================"
-        JAR_BASE_DIR="${JARFILES_DIR:-${PROJECT_ROOT}/JARFILES_${IMG_SAFE}}"
+        JAR_BASE_DIR="${JARFILES_DIR:-${PROJECT_ROOT}/JARFILES_${IMG_NAME}}"
 
         BYTECODE_MODE="${BYTECODE_MODE:-1}"
         echo "Bytecode analysis mode: $BYTECODE_MODE"
@@ -76,10 +76,10 @@ echo "============================================================"
 echo " STEP 5: Running binary_analysis"
 echo "============================================================"
 
-LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-${PROJECT_ROOT}/LIBS_${IMG_SAFE}}}"
-STARTFUNCS_DIR="${OUTPUTS_DIR:-${PROJECT_ROOT}/outputs_${IMG_SAFE}}"
-SYSCALLS_OUT_DIR="${SYSCALLS_OUTPUT_DIR:-${PROJECT_ROOT}/syscalls_output_${IMG_SAFE}}"
-BINARIES_BASE_DIR="${BINARIES_DIR:-${PROJECT_ROOT}/BINARIES_${IMG_SAFE}}"
+LIBS_BASE_DIR="${LIBS_IMAGE:-${LIBS_DIR:-${PROJECT_ROOT}/LIBS_${IMG_NAME}}}"
+STARTFUNCS_DIR="${OUTPUTS_DIR:-${PROJECT_ROOT}/outputs_${IMG_NAME}}"
+SYSCALLS_OUT_DIR="${SYSCALLS_OUTPUT_DIR:-${PROJECT_ROOT}/syscalls_output_${IMG_NAME}}"
+BINARIES_BASE_DIR="${BINARIES_DIR:-${PROJECT_ROOT}/BINARIES_${IMG_NAME}}"
 
 # Determine which binaries to analyze based on mode
 if [ "$ANALYSIS_MODE" = "FULL_BYTECODE" ]; then
@@ -90,7 +90,7 @@ if [ "$ANALYSIS_MODE" = "FULL_BYTECODE" ]; then
       --binaries-dir "${BINARIES_BASE_DIR}" \
       --startfunc-dir "${STARTFUNCS_DIR}" \
       --output-dir "${SYSCALLS_OUT_DIR}" \
-      --img-safe "${IMG_SAFE}" \
+      --img-name "${IMG_NAME}" \
       --log
 
 elif [ "$ANALYSIS_MODE" = "LIBRARY_SYMBOLS" ]; then
@@ -146,7 +146,7 @@ elif [ "$ANALYSIS_MODE" = "LIBRARY_SYMBOLS" ]; then
       --binaries-dir "${BINARIES_BASE_DIR}" \
       --startfunc-dir "${STARTFUNCS_DIR}" \
       --output-dir "${SYSCALLS_OUT_DIR}" \
-      --img-safe "${IMG_SAFE}" \
+      --img-name "${IMG_NAME}" \
       --log
 
 elif [ "$ANALYSIS_MODE" = "BINARY_ONLY" ]; then
@@ -160,7 +160,7 @@ elif [ "$ANALYSIS_MODE" = "BINARY_ONLY" ]; then
       --binary-dir "${LIBS_BASE_DIR}" \
       --binaries-dir "${BINARIES_BASE_DIR}" \
       --output-dir "${SYSCALLS_OUT_DIR}" \
-      --img-safe "${IMG_SAFE}" \
+      --img-name "${IMG_NAME}" \
       --binaries-only \
       --log
 fi

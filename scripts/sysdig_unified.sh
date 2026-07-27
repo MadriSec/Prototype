@@ -32,7 +32,7 @@ fi
 CNAME=$(docker inspect -f '{{.Name}}' "$CONTAINER_ID" 2>/dev/null | sed 's/^\///' || echo "$CONTAINER_ID")
 CONTPID=$(docker inspect -f '{{.State.Pid}}' "$CONTAINER_ID" 2>/dev/null)
 IMG_RAW=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_ID" 2>/dev/null || echo "$CNAME")
-IMG_SAFE=$(echo "$IMG_RAW" | tr '/:@' '___' | sed 's/[^A-Za-z0-9._-]/_/g')
+IMG_NAME=$(echo "$IMG_RAW" | tr '/:@' '___' | sed 's/[^A-Za-z0-9._-]/_/g')
 
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║          Unified Sysdig Capture - All Resources             ║"
@@ -42,19 +42,19 @@ echo "Container Name: $CNAME"
 echo "Container ID:   $CONTAINER_ID"
 echo "Container PID:  $CONTPID"
 echo "Image:          $IMG_RAW"
-echo "IMG_SAFE:       $IMG_SAFE"
+echo "IMG_NAME:       $IMG_NAME"
 echo "Duration:       ${DURATION}s"
 echo ""
 
 # Create output directory for sysdig dynamic analysis
-SYSDIG_OUTPUT_DIR="${PROJECT_ROOT}/sysdig_outputs_${IMG_SAFE}"
+SYSDIG_OUTPUT_DIR="${PROJECT_ROOT}/sysdig_outputs_${IMG_NAME}"
 mkdir -p "$SYSDIG_OUTPUT_DIR"
 
 # Output files
 RAW_OUTPUT="$SYSDIG_OUTPUT_DIR/raw_capture.txt"
 LIBS_OUTPUT="$SYSDIG_OUTPUT_DIR/libs_loaded_raw.txt"
-BINARIES_OUTPUT="$SYSDIG_OUTPUT_DIR/binaries_${IMG_SAFE}.txt"
-JARS_OUTPUT="$SYSDIG_OUTPUT_DIR/jars_${IMG_SAFE}.txt"
+BINARIES_OUTPUT="$SYSDIG_OUTPUT_DIR/binaries_${IMG_NAME}.txt"
+JARS_OUTPUT="$SYSDIG_OUTPUT_DIR/jars_${IMG_NAME}.txt"
 
 echo "Output directory: $SYSDIG_OUTPUT_DIR"
 echo ""
@@ -257,14 +257,14 @@ if [ -s "${RAW_OUTPUT}.execve" ]; then
     awk '{print $4}' "$BINARIES_OUTPUT" | \
       grep -v '[0-9]:[0-9]' | \
       grep -v 'execve' | \
-      sort -u > "$SYSDIG_OUTPUT_DIR/binaries_unique_${IMG_SAFE}.txt"
-    UNIQUE_BINS=$(wc -l < "$SYSDIG_OUTPUT_DIR/binaries_unique_${IMG_SAFE}.txt")
+      sort -u > "$SYSDIG_OUTPUT_DIR/binaries_unique_${IMG_NAME}.txt"
+    UNIQUE_BINS=$(wc -l < "$SYSDIG_OUTPUT_DIR/binaries_unique_${IMG_NAME}.txt")
     echo "        ✓ $UNIQUE_BINS unique executables"
 
     # Resolve relative paths - check both container and host
     echo "        ⚙ Resolving relative binary paths..."
-    > "$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_SAFE}.txt"
-    > "$SYSDIG_OUTPUT_DIR/binaries_host_${IMG_SAFE}.txt"
+    > "$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_NAME}.txt"
+    > "$SYSDIG_OUTPUT_DIR/binaries_host_${IMG_NAME}.txt"
 
     while read -r bin_path; do
         [ -z "$bin_path" ] && continue
@@ -280,26 +280,26 @@ if [ -s "${RAW_OUTPUT}.execve" ]; then
                            echo "")
 
             if [ -n "$resolved_path" ] && [[ "$resolved_path" =~ ^/ ]]; then
-                echo "$resolved_path" >> "$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_SAFE}.txt"
+                echo "$resolved_path" >> "$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_NAME}.txt"
             else
                 # Try on host (for binaries like runc, docker, containerd)
                 host_path=$(which "$bin_path" 2>/dev/null || echo "")
                 if [ -n "$host_path" ] && [ -f "$host_path" ]; then
-                    echo "$host_path" >> "$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_SAFE}.txt"
-                    echo "$host_path" >> "$SYSDIG_OUTPUT_DIR/binaries_host_${IMG_SAFE}.txt"
+                    echo "$host_path" >> "$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_NAME}.txt"
+                    echo "$host_path" >> "$SYSDIG_OUTPUT_DIR/binaries_host_${IMG_NAME}.txt"
                 else
-                    echo "$bin_path" >> "$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_SAFE}.txt"
+                    echo "$bin_path" >> "$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_NAME}.txt"
                 fi
             fi
         else
-            echo "$bin_path" >> "$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_SAFE}.txt"
+            echo "$bin_path" >> "$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_NAME}.txt"
         fi
-    done < "$SYSDIG_OUTPUT_DIR/binaries_unique_${IMG_SAFE}.txt"
+    done < "$SYSDIG_OUTPUT_DIR/binaries_unique_${IMG_NAME}.txt"
     echo "        ✓ Resolved paths saved"
 else
     echo "        ⚠ No executable events captured"
     touch "$BINARIES_OUTPUT"
-    touch "$SYSDIG_OUTPUT_DIR/binaries_unique_${IMG_SAFE}.txt"
+    touch "$SYSDIG_OUTPUT_DIR/binaries_unique_${IMG_NAME}.txt"
 fi
 
 # Extract JAR files (open/openat/openat2/mmap — JVM often mmap()s JAR/ZIP files)
@@ -311,8 +311,8 @@ JARS_COUNT=$(wc -l < "$JARS_OUTPUT")
 echo "        ✓ Found $JARS_COUNT JAR file accesses"
 
 # Create unique JARs list (filename is column 5: timestamp event_type pid proc.name filename fd.typechar)
-awk '{print $5}' "$JARS_OUTPUT" | sort -u > "$SYSDIG_OUTPUT_DIR/jars_unique_${IMG_SAFE}.txt"
-UNIQUE_JARS=$(wc -l < "$SYSDIG_OUTPUT_DIR/jars_unique_${IMG_SAFE}.txt")
+awk '{print $5}' "$JARS_OUTPUT" | sort -u > "$SYSDIG_OUTPUT_DIR/jars_unique_${IMG_NAME}.txt"
+UNIQUE_JARS=$(wc -l < "$SYSDIG_OUTPUT_DIR/jars_unique_${IMG_NAME}.txt")
 echo "        ✓ $UNIQUE_JARS unique JAR files"
 
 echo ""
@@ -334,9 +334,9 @@ echo "╚═══════════════════════�
 echo ""
 
 # Create destination directories
-LIBS_DIR="${PROJECT_ROOT}/LIBS_${IMG_SAFE}"
-BINS_DIR="${PROJECT_ROOT}/BINARIES_${IMG_SAFE}"
-JARS_DIR="${PROJECT_ROOT}/JARFILES_${IMG_SAFE}"
+LIBS_DIR="${PROJECT_ROOT}/LIBS_${IMG_NAME}"
+BINS_DIR="${PROJECT_ROOT}/BINARIES_${IMG_NAME}"
+JARS_DIR="${PROJECT_ROOT}/JARFILES_${IMG_NAME}"
 
 mkdir -p "$LIBS_DIR" "$BINS_DIR" "$JARS_DIR"
 
@@ -376,17 +376,17 @@ BIN_FAILED_LIST="$SYSDIG_OUTPUT_DIR/failed_binaries.txt"
 > "$BIN_FAILED_LIST"
 
 # Use resolved paths if available, otherwise fall back to unique list
-BINARIES_SOURCE="$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_SAFE}.txt"
+BINARIES_SOURCE="$SYSDIG_OUTPUT_DIR/binaries_resolved_${IMG_NAME}.txt"
 if [ ! -s "$BINARIES_SOURCE" ]; then
-    BINARIES_SOURCE="$SYSDIG_OUTPUT_DIR/binaries_unique_${IMG_SAFE}.txt"
+    BINARIES_SOURCE="$SYSDIG_OUTPUT_DIR/binaries_unique_${IMG_NAME}.txt"
 fi
 
 # Load host binaries list
 declare -A HOST_BINARIES
-if [ -f "$SYSDIG_OUTPUT_DIR/binaries_host_${IMG_SAFE}.txt" ]; then
+if [ -f "$SYSDIG_OUTPUT_DIR/binaries_host_${IMG_NAME}.txt" ]; then
     while read -r host_bin; do
         HOST_BINARIES["$host_bin"]=1
-    done < "$SYSDIG_OUTPUT_DIR/binaries_host_${IMG_SAFE}.txt"
+    done < "$SYSDIG_OUTPUT_DIR/binaries_host_${IMG_NAME}.txt"
 fi
 
 while read -r bin_path; do
@@ -473,7 +473,7 @@ while read -r jar_path; do
     else
         JAR_FAILED=$((JAR_FAILED + 1))
     fi
-done < "$SYSDIG_OUTPUT_DIR/jars_unique_${IMG_SAFE}.txt"
+done < "$SYSDIG_OUTPUT_DIR/jars_unique_${IMG_NAME}.txt"
 
 echo "      ✓ Success: $JAR_SUCCESS JARs"
 [ $JAR_FAILED -gt 0 ] && echo "      ⚠ Failed: $JAR_FAILED JARs"
@@ -557,5 +557,5 @@ echo "Executables:        $BINS_DIR/ ($BIN_SUCCESS files)"
 echo "JAR Files:          $JARS_DIR/ ($JAR_SUCCESS files)"
 echo ""
 echo "Next step:"
-echo "  Run: ./scripts/automate_syscall_analysis.sh --img-safe $IMG_SAFE --log"
+echo "  Run: ./scripts/automate_syscall_analysis.sh --img-name $IMG_NAME --log"
 echo ""

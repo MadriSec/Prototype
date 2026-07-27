@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Determine output directory based on IMG_SAFE or OUTPUTS_DIR
-IMG_SAFE="${IMG_SAFE:-}"
+# Determine output directory based on IMG_NAME or OUTPUTS_DIR
+IMG_NAME="${IMG_NAME:-}"
 OUTPUTS_DIR="${OUTPUTS_DIR:-}"
 
 if [[ -n "$OUTPUTS_DIR" ]]; then
     OUTPUT_BASE="$OUTPUTS_DIR"
-elif [[ -n "$IMG_SAFE" ]]; then
-    OUTPUT_BASE="outputs_${IMG_SAFE}"
+elif [[ -n "$IMG_NAME" ]]; then
+    OUTPUT_BASE="outputs_${IMG_NAME}"
 else
     OUTPUT_BASE="."
 fi

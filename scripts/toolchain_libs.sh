@@ -15,10 +15,10 @@ CG=$(awk -F: '/:\/docker\//{print $3} $0~/0::/{print $3}' /proc/$CONTPID/cgroup 
 
 # Derive image-safe suffix for output directories
 IMG_RAW=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_ID" 2>/dev/null || echo "$CNAME")
-IMG_SAFE=$(echo "$IMG_RAW" | tr '/:@' '___' | sed 's/[^A-Za-z0-9._-]/_/g')
+IMG_NAME=$(echo "$IMG_RAW" | tr '/:@' '___' | sed 's/[^A-Za-z0-9._-]/_/g')
 
 # Create outputs directory for this container
-OUTPUTS_DIR="${PROJECT_ROOT}/outputs_${IMG_SAFE}"
+OUTPUTS_DIR="${PROJECT_ROOT}/outputs_${IMG_NAME}"
 mkdir -p "$OUTPUTS_DIR"
 
 echo "Container Name: $CNAME"
@@ -145,7 +145,7 @@ fi
 echo "------------------------------------------------------------"
 
 # --- STEP 4: Copy libraries to host ---
-DEST_DIR="${PROJECT_ROOT}/LIBS_${IMG_SAFE}"
+DEST_DIR="${PROJECT_ROOT}/LIBS_${IMG_NAME}"
 echo "Creating destination directory: $DEST_DIR"
 mkdir -p "$DEST_DIR"
 

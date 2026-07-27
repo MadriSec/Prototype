@@ -11,17 +11,17 @@
 #        source `JNINativeMethod` tables (when `JVM_SRC` is set).
 #     3) Symbol resolution across transitive runtime dependencies (via ldd) to
 #        identify which `.so` actually defines a target symbol.
-#     4) jni_dynamic_bindings.txt from OUTPUTS_DIR/<IMG_SAFE>/ ONLY
+#     4) jni_dynamic_bindings.txt from OUTPUTS_DIR/<IMG_NAME>/ ONLY
 #        (the canonical extract_jni_bindings.py output for this container);
 #        plus optional JNI_DYNAMIC_BINDING_DIRS (explicit opt-in via env var).
-#        cwd / LIBS_<IMG_SAFE>/ / supplemental third-party dirs (netty_libs,
+#        cwd / LIBS_<IMG_NAME>/ / supplemental third-party dirs (netty_libs,
 #        netty_libs_all, hawtjni_libs, hadoop_libs, hadoop_ec_downloads) are
 #        no longer auto-walked: those generic dumps cover Netty/Hadoop versions
 #        the container does not actually ship and leaked false positives.
 #
 # Key environment inputs:
 #   - LIB_DIRS: os.pathsep-separated directories to scan for ELF `.so` files.
-#     Under each LIBS_<IMG_SAFE> directory, optional subfolders named JDK<N>_LIBS/
+#     Under each LIBS_<IMG_NAME> directory, optional subfolders named JDK<N>_LIBS/
 #     (e.g. JDK11_LIBS/) are auto-discovered.  Also supported:
 #       - JDK_LIBS_DIRS / JDK_LIBS_DIR: explicit path(s) to JDK<N>_LIBS trees
 #         (pathsep-separated, same as LIB_DIRS).
@@ -49,7 +49,7 @@ import time
 # Config / Inputs
 # ----------------------------
 # Project root is the repository root, even when this helper lives under scripts/.
-# Used to render LIBS_<IMG_SAFE>/libfoo.so as a project-relative path in the output.
+# Used to render LIBS_<IMG_NAME>/libfoo.so as a project-relative path in the output.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR) if os.path.basename(SCRIPT_DIR) == "scripts" else SCRIPT_DIR
 
@@ -238,16 +238,16 @@ if _JDK_NATIVE_EXTRA:
         print(f"  + {p}")
         print(f"      ({lab})")
 
-# The script is strictly per-container: only the user-provided LIBS_<IMG_SAFE>
+# The script is strictly per-container: only the user-provided LIBS_<IMG_NAME>
 # directories feed symbol/binding resolution.  Supplemental third-party native
 # bundles (the previous netty_libs / netty_libs_all / hawtjni_libs / hadoop_libs
 # / hadoop_ec_downloads list) and JDK-specific fallbacks (system
 # /usr/lib/jvm/java-8-openjdk-amd64/*, LIBS_jdk8_temurin) have all been removed
 # deliberately:
 #   * extract_jni_bindings.py now ships per-container output at
-#     OUTPUTS_DIR/<IMG_SAFE>/jni_dynamic_bindings.txt for the Netty/HawtJNI/
+#     OUTPUTS_DIR/<IMG_NAME>/jni_dynamic_bindings.txt for the Netty/HawtJNI/
 #     Hadoop/etc. bundles the container actually loads.
-#   * extract_registernatives_binary.py on LIBS_<IMG_SAFE>/libjvm.so covers
+#   * extract_registernatives_binary.py on LIBS_<IMG_NAME>/libjvm.so covers
 #     JVM_*/Unsafe_*/MHN_* etc., filtered against libjvm.so symbols.
 # Mixing in generic third-party dumps was leaking versions of Netty/Hadoop/SWT
 # the container does not ship; mixing in JDK-8 system libs produced false
@@ -258,7 +258,7 @@ PRIMARY_LIB_DIRS = list(LIB_DIRS)
 
 
 # Resolve a library path to a priority bucket. Lower number = higher priority.
-# 0..len(PRIMARY_LIB_DIRS)-1: inside a user-provided LIB_DIR (LIBS_<IMG_SAFE>)
+# 0..len(PRIMARY_LIB_DIRS)-1: inside a user-provided LIB_DIR (LIBS_<IMG_NAME>)
 # 999:                         anywhere else (system path / ldd-resolved / unknown)
 _PRIMARY_LIB_DIRS_ABS = [os.path.abspath(d) for d in PRIMARY_LIB_DIRS]
 
@@ -1265,14 +1265,14 @@ def _auto_extract_registernatives_binary(so_files: list, output_dir_path: str) -
 
 def discover_jni_dynamic_binding_paths(output_dir_path: str, primary_lib_dirs: list) -> list:
     """
-    Resolve jni_dynamic_bindings.txt strictly from OUTPUTS_DIR/<IMG_SAFE>/.
+    Resolve jni_dynamic_bindings.txt strictly from OUTPUTS_DIR/<IMG_NAME>/.
 
     If that file is missing, auto-generate it by running extract_jni_bindings.py
-    against the *first* user-provided LIB_DIR (LIBS_<IMG_SAFE>/).  This keeps
+    against the *first* user-provided LIB_DIR (LIBS_<IMG_NAME>/).  This keeps
     the binding table tied to the exact .so files the container actually ships,
     matching the per-container scoping rule used for jvm_dynamic_mapping.txt.
 
-    The previous auto-walk over cwd, LIBS_<IMG_SAFE>/, and the supplemental
+    The previous auto-walk over cwd, LIBS_<IMG_NAME>/, and the supplemental
     NON-JDK third-party bundles (netty_libs / netty_libs_all / hawtjni_libs /
     hadoop_libs / hadoop_ec_downloads) was leaking Netty/Hadoop/SWT bindings
     from versions the container does not actually ship.
@@ -1345,7 +1345,7 @@ def load_jni_dynamic_bindings(binding_paths: list, so_paths: list) -> dict:
     Returns: dict[java_method] -> (jni_symbol, library_path)
 
     Conflict resolution per java_method (lower priority value wins):
-      0..N-1  : LIBS_<IMG_SAFE>/  (PRIMARY_LIB_DIRS, in order)
+      0..N-1  : LIBS_<IMG_NAME>/  (PRIMARY_LIB_DIRS, in order)
       999     : unresolved or path outside the project tree
 
     Tie-breaker at the same priority level: keep the first row encountered
@@ -1548,8 +1548,8 @@ def scan_native_tables(src_root: str):
 #
 # The scan_native_tables() source-tree walk remains as a fallback — but
 # the preferred flow is:
-#   1) Run extract_registernatives_binary.py on LIBS_<IMG_SAFE>/libjvm.so
-#   2) Write output to OUTPUTS_<IMG_SAFE>/jvm_dynamic_mapping.txt
+#   1) Run extract_registernatives_binary.py on LIBS_<IMG_NAME>/libjvm.so
+#   2) Write output to OUTPUTS_<IMG_NAME>/jvm_dynamic_mapping.txt
 #   3) Load the pipe-delimited mapping, intersecting native_symbol with
 #      what `nm libjvm.so` actually defines to drop phantom entries.
 # ----------------------------

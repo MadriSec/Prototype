@@ -3,14 +3,14 @@
 import sys, argparse, re, os
 from collections import OrderedDict
 
-# Determine output directory based on IMG_SAFE or OUTPUTS_DIR environment variable
-img_safe = os.environ.get("IMG_SAFE", "").strip()
+# Determine output directory based on IMG_NAME or OUTPUTS_DIR environment variable
+img_name = os.environ.get("IMG_NAME", "").strip()
 outputs_dir_env = os.environ.get("OUTPUTS_DIR", "").strip()
 
 if outputs_dir_env:
     SPLIT_DIR_DEFAULT = outputs_dir_env
-elif img_safe:
-    SPLIT_DIR_DEFAULT = f"outputs_{img_safe}"
+elif img_name:
+    SPLIT_DIR_DEFAULT = f"outputs_{img_name}"
 else:
     SPLIT_DIR_DEFAULT = "outputs"
 
@@ -96,7 +96,7 @@ def write_combined(groups, final_out, do_sort=False, do_uniq=False):
 def lib_relative_path(name: str) -> str:
     """Convert a library path to a relative path suitable for per-library output files.
 
-    Strips the leading LIBS_<IMG_SAFE>/ prefix so that the output filename preserves
+    Strips the leading LIBS_<IMG_NAME>/ prefix so that the output filename preserves
     the subdirectory structure (e.g. JDK8_LIBS/amd64/libnet.so).  This allows
     automate_syscall_analysis.sh to locate the actual binary at
     $BINARY_DIR/JDK8_LIBS/amd64/libnet.so.

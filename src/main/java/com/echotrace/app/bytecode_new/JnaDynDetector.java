@@ -59,7 +59,6 @@ public final class JnaDynDetector {
     private static final String API_UNKNOWN                        = "<?>";
 
     // Progress logging intervals
-    private static final long HEARTBEAT_MS = 5000;
     private static final int  METHOD_TICK  = 50_000;
 
     /** Max fixed-point iterations for the taint/summary population pass. */
@@ -119,7 +118,6 @@ public final class JnaDynDetector {
             skipW.write("Format: methodSig | exceptionType | message\n\n");
 
             final long start = System.currentTimeMillis();
-            final long[] lastBeat = { start };
 
             long methodsSeen = 0;
             long methodsScanned = 0;
@@ -212,14 +210,6 @@ public final class JnaDynDetector {
                                 + " methodsScanned=" + methodsScanned
                                 + " hits=" + hits
                                 + " skipped=" + skipped);
-                    }
-                    if (now - lastBeat[0] >= HEARTBEAT_MS) {
-                        System.out.println("[HEARTBEAT] elapsed=" + ((now - start) / 1000) + "s"
-                                + " methodsSeen=" + methodsSeen
-                                + " methodsScanned=" + methodsScanned
-                                + " hits=" + hits
-                                + " skipped=" + skipped);
-                        lastBeat[0] = now;
                     }
 
                     try {

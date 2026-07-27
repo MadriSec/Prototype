@@ -15,7 +15,7 @@ CG=$(awk -F: '/:\/docker\//{print $3} $0~/0::/{print $3}' /proc/$CONTPID/cgroup 
 
 # Derive a stable image name suffix for output dirs
 IMG_RAW=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_ID" 2>/dev/null || echo "$CNAME")
-IMG_SAFE=$(echo "$IMG_RAW" | tr '/:@' '___' | sed 's/[^A-Za-z0-9._-]/_/g')
+IMG_NAME=$(echo "$IMG_RAW" | tr '/:@' '___' | sed 's/[^A-Za-z0-9._-]/_/g')
 
 echo "Container Name: $CNAME"
 echo "Container PID: $CONTPID"
@@ -111,7 +111,7 @@ cat binaries_abs.txt
 echo "------------------------------------------------------------"
 
 # --- STEP 7: Copy JAR/JMOD/module files ---
-DEST_DIR_JARS="${PROJECT_ROOT}/JARFILES_${IMG_SAFE}"
+DEST_DIR_JARS="${PROJECT_ROOT}/JARFILES_${IMG_NAME}"
 echo "Creating destination directory: $DEST_DIR_JARS"
 mkdir -p "$DEST_DIR_JARS"
 
@@ -125,7 +125,7 @@ for jar_path in $JAR_FILES; do
 done
 
 # --- STEP 8: Copy executed binaries ---
-DEST_DIR_BIN="${PROJECT_ROOT}/BINARIES_${IMG_SAFE}"
+DEST_DIR_BIN="${PROJECT_ROOT}/BINARIES_${IMG_NAME}"
 echo "Creating destination directory: $DEST_DIR_BIN"
 mkdir -p "$DEST_DIR_BIN"
 
