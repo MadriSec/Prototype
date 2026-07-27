@@ -2,9 +2,9 @@
 """
 extract_container_jdk.py - extract JDK runtime artifacts from a Docker container.
 
-By default, copies JDK runtime JARs into RUNTIME_<IMG_SAFE>/.
+By default, copies JDK runtime JARs into RUNTIME_<IMG_NAME>/.
 With --libs or --libs-only, also (or only) copies *.so files into
-LIBS_<IMG_SAFE>/JDK<N>_LIBS/.
+LIBS_<IMG_NAME>/JDK<N>_LIBS/.
 
 Usage:
     python3 scripts/extract_container_jdk.py <container_name> [options]
@@ -20,14 +20,14 @@ Usage:
 
 Options:
     --force                Re-extract even if output dirs already exist.
-    --out-name=<name>      Override IMG_SAFE in output paths.
-    --runtime-dir=<path>   Output directory for JDK jars (overrides RUNTIME_IMG_SAFE env).
-    --libs                 Also extract .so files into LIBS_<IMG_SAFE>/JDK<N>_LIBS/.
+    --out-name=<name>      Override IMG_NAME in output paths.
+    --runtime-dir=<path>   Output directory for JDK jars (overrides RUNTIME_IMG_NAME env).
+    --libs                 Also extract .so files into LIBS_<IMG_NAME>/JDK<N>_LIBS/.
     --libs-only            Only extract .so files (skip JAR extraction).
-    --libs-dir=<path>      Override .so output parent dir (default: LIBS_<IMG_SAFE>/).
+    --libs-dir=<path>      Override .so output parent dir (default: LIBS_<IMG_NAME>/).
     --project-root=<path>  Base directory for LIBS output (default: cwd).
 
-IMG_SAFE is derived from the container image name (not the container name/ID):
+IMG_NAME is derived from the container image name (not the container name/ID):
 
     cassandra:5.0.6-bookworm  -> cassandra_5.0.6-bookworm
     solr:8.7.0-slim           -> solr_8.7.0-slim
@@ -97,7 +97,7 @@ def container_has_jmods(container: str, java_home: str) -> bool:
     return rc == 0
 
 
-def img_safe_from_image(image: str) -> str:
+def img_name_from_image(image: str) -> str:
     """Convert a Docker image reference like 'cassandra:5.0.6-bookworm' or
     'docker.elastic.co/elasticsearch/elasticsearch:7.17.18' into a
     filesystem-safe identifier matching the project's JARFILES_* convention:
@@ -337,16 +337,16 @@ def main() -> int:
     ap.add_argument("--force", action="store_true",
                     help="Re-extract even if output dirs already exist")
     ap.add_argument("--out-name", default=None,
-                    help="Override IMG_SAFE used in output paths")
+                    help="Override IMG_NAME used in output paths")
     ap.add_argument("--runtime-dir", default=None,
-                    help="JDK jar output directory (overrides RUNTIME_IMG_SAFE env)")
+                    help="JDK jar output directory (overrides RUNTIME_IMG_NAME env)")
     libs_group = ap.add_mutually_exclusive_group()
     libs_group.add_argument("--libs", action="store_true",
-                            help="Also extract .so files into LIBS_<IMG_SAFE>/JDK<N>_LIBS/")
+                            help="Also extract .so files into LIBS_<IMG_NAME>/JDK<N>_LIBS/")
     libs_group.add_argument("--libs-only", action="store_true",
                             help="Only extract .so files (skip JAR extraction)")
     ap.add_argument("--libs-dir", default=None,
-                    help="Override .so output parent dir (default: LIBS_<IMG_SAFE>/)")
+                    help="Override .so output parent dir (default: LIBS_<IMG_NAME>/)")
     ap.add_argument("--project-root", type=Path, default=Path.cwd(),
                     help="Base directory for LIBS output (default: cwd)")
     args = ap.parse_args()
@@ -357,9 +357,9 @@ def main() -> int:
         image_ref = None
     else:
         image_ref = resolve_image_name(container)
-        safe = img_safe_from_image(image_ref)
+        safe = img_name_from_image(image_ref)
 
-    env_runtime = os.environ.get("RUNTIME_IMG_SAFE", "").strip()
+    env_runtime = os.environ.get("RUNTIME_IMG_NAME", "").strip()
     if args.runtime_dir:
         jdk_dir = Path(args.runtime_dir)
     elif env_runtime:
@@ -370,7 +370,7 @@ def main() -> int:
     print(f"=== Container: {container} ===")
     if image_ref and image_ref != container:
         print(f"  image     = {image_ref}")
-    print(f"  IMG_SAFE  = {safe}")
+    print(f"  IMG_NAME  = {safe}")
     java_home = detect_java_home(container)
     major = detect_jdk_major(container, java_home)
     has_jmods = container_has_jmods(container, java_home) if major >= 9 else False

@@ -38,16 +38,16 @@ echo "------------------------------------------------------------"
 
 # Derive image-safe suffix and export dirs for this run
 IMG_RAW=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_ID" 2>/dev/null || echo "$CONTAINER_ID")
-IMG_SAFE=$(echo "$IMG_RAW" | tr '/:@' '___' | sed 's/[^A-Za-z0-9._-]/_/g')
-export IMG_SAFE
-export JARFILES_DIR="${SCRIPT_DIR}/JARFILES_${IMG_SAFE}"
-export JARFILES_IMAGE="${SCRIPT_DIR}/JARFILES_${IMG_SAFE}"
-export LIBS_DIR="${SCRIPT_DIR}/LIBS_${IMG_SAFE}"
-export LIBS_IMAGE="${SCRIPT_DIR}/LIBS_${IMG_SAFE}"
-export BINARIES_DIR="${SCRIPT_DIR}/BINARIES_${IMG_SAFE}"
-export OUTPUTS_DIR="${SCRIPT_DIR}/outputs_${IMG_SAFE}"
-export RUNTIME_DIR="${SCRIPT_DIR}/RUNTIME_${IMG_SAFE}"
-export SYSCALLS_OUTPUT_DIR="${SCRIPT_DIR}/syscalls_output_${IMG_SAFE}"
+IMG_NAME=$(echo "$IMG_RAW" | tr '/:@' '___' | sed 's/[^A-Za-z0-9._-]/_/g')
+export IMG_NAME
+export JARFILES_DIR="${SCRIPT_DIR}/JARFILES_${IMG_NAME}"
+export JARFILES_IMAGE="${SCRIPT_DIR}/JARFILES_${IMG_NAME}"
+export LIBS_DIR="${SCRIPT_DIR}/LIBS_${IMG_NAME}"
+export LIBS_IMAGE="${SCRIPT_DIR}/LIBS_${IMG_NAME}"
+export BINARIES_DIR="${SCRIPT_DIR}/BINARIES_${IMG_NAME}"
+export OUTPUTS_DIR="${SCRIPT_DIR}/outputs_${IMG_NAME}"
+export RUNTIME_DIR="${SCRIPT_DIR}/RUNTIME_${IMG_NAME}"
+export SYSCALLS_OUTPUT_DIR="${SCRIPT_DIR}/syscalls_output_${IMG_NAME}"
 
 # Ensure image-scoped outputs directory exists and point generic 'outputs' symlink to it
 mkdir -p "$OUTPUTS_DIR"
@@ -133,10 +133,10 @@ bash "${SCRIPT_DIR}/scripts/run_analysis.sh"
 
 echo ""
 echo "============================================================"
-echo " STEP 4: Organizing results into results/${IMG_SAFE}/"
+echo " STEP 4: Organizing results into results/${IMG_NAME}/"
 echo "============================================================"
 
-# RESULTS_DIR="${SCRIPT_DIR}/results/${IMG_SAFE}"
+# RESULTS_DIR="${SCRIPT_DIR}/results/${IMG_NAME}"
 # mkdir -p "$RESULTS_DIR/Binary_Analysis" \
 #          "$RESULTS_DIR/ByteCode_Analysis" \
 #          "$RESULTS_DIR/Dynamic_Analysis" \
@@ -145,7 +145,7 @@ echo "============================================================"
 # BASE="${SCRIPT_DIR}"
 
 # # --- Binary_Analysis ---
-# for dir in "syscalls_BIN_${IMG_SAFE}" "syscalls_LIBS_${IMG_SAFE}" "syscalls_output_${IMG_SAFE}"; do
+# for dir in "syscalls_BIN_${IMG_NAME}" "syscalls_LIBS_${IMG_NAME}" "syscalls_output_${IMG_NAME}"; do
 #     src="$BASE/$dir"
 #     if [ -d "$src" ]; then
 #         echo "  Moving $dir → Binary_Analysis/"
@@ -154,16 +154,16 @@ echo "============================================================"
 # done
 
 # # --- ByteCode_Analysis ---
-# src="$BASE/outputs_${IMG_SAFE}"
+# src="$BASE/outputs_${IMG_NAME}"
 # if [ -d "$src" ] && [ ! -L "$src" ]; then
-#     echo "  Moving outputs_${IMG_SAFE} → ByteCode_Analysis/"
+#     echo "  Moving outputs_${IMG_NAME} → ByteCode_Analysis/"
 #     mv "$src" "$RESULTS_DIR/ByteCode_Analysis/"
 # elif [ -L "$src" ]; then
-#     # outputs_${IMG_SAFE} might be the real dir pointed to by the 'outputs' symlink
+#     # outputs_${IMG_NAME} might be the real dir pointed to by the 'outputs' symlink
 #     real_src="$(readlink -f "$src")"
 #     if [ -d "$real_src" ]; then
 #         rm -f "$src"  # remove symlink first
-#         echo "  Moving outputs_${IMG_SAFE} → ByteCode_Analysis/"
+#         echo "  Moving outputs_${IMG_NAME} → ByteCode_Analysis/"
 #         mv "$real_src" "$RESULTS_DIR/ByteCode_Analysis/"
 #     fi
 # fi
@@ -171,14 +171,14 @@ echo "============================================================"
 # rm -f "$BASE/outputs" 2>/dev/null || true
 
 # # --- Dynamic_Analysis ---
-# src="$BASE/sysdig_outputs_${IMG_SAFE}"
+# src="$BASE/sysdig_outputs_${IMG_NAME}"
 # if [ -d "$src" ]; then
-#     echo "  Moving sysdig_outputs_${IMG_SAFE} → Dynamic_Analysis/"
+#     echo "  Moving sysdig_outputs_${IMG_NAME} → Dynamic_Analysis/"
 #     mv "$src" "$RESULTS_DIR/Dynamic_Analysis/"
 # fi
 
 # # --- Extracted_Data ---
-# for dir in "BINARIES_${IMG_SAFE}" "JARFILES_${IMG_SAFE}" "LIBS_${IMG_SAFE}"; do
+# for dir in "BINARIES_${IMG_NAME}" "JARFILES_${IMG_NAME}" "LIBS_${IMG_NAME}"; do
 #     src="$BASE/$dir"
 #     if [ -d "$src" ]; then
 #         echo "  Moving $dir → Extracted_Data/"

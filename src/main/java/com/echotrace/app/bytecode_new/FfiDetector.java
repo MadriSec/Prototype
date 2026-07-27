@@ -61,7 +61,6 @@ public final class FfiDetector {
     private static final String MECHANISM = "downcallHandle";
 
     // Progress logging
-    private static final long HEARTBEAT_MS = 5000;
     private static final int  METHOD_TICK  = 50_000;
 
     /** Max fixed-point iterations for the taint-population pass. */
@@ -129,7 +128,6 @@ public final class FfiDetector {
             skipW.write("Format: methodSig | exceptionType | message\n\n");
 
             final long start = System.currentTimeMillis();
-            final long[] lastBeat = { start };
 
             long methodsSeen = 0;
             long methodsScanned = 0;
@@ -196,13 +194,6 @@ public final class FfiDetector {
                                 + " scanned=" + methodsScanned
                                 + " hits=" + hits
                                 + " skipped=" + skipped);
-                    }
-                    if (now - lastBeat[0] >= HEARTBEAT_MS) {
-                        System.out.println("[HEARTBEAT] elapsed=" + ((now - start) / 1000) + "s"
-                                + " methods=" + methodsSeen
-                                + " scanned=" + methodsScanned
-                                + " hits=" + hits);
-                        lastBeat[0] = now;
                     }
 
                     try {

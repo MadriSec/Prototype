@@ -45,7 +45,7 @@ The key design choice is that EchoTrace analyzes the container's own artifacts r
 | Stage | Tool | Input | Output |
 |-------|------|-------|--------|
 | 1. Dynamic capture | Sysdig (eBPF) | Running container | Lists of loaded libraries, JARs, executables |
-| 2. Extraction | `docker cp` | Container filesystem | `LIBS_<IMG_SAFE>/`, `JARFILES_<IMG_SAFE>/`, `BINARIES_<IMG_SAFE>/`, `RUNTIME_<IMG_SAFE>/` directories |
+| 2. Extraction | `docker cp` | Container filesystem | `LIBS_<IMG_NAME>/`, `JARFILES_<IMG_NAME>/`, `BINARIES_<IMG_NAME>/`, `RUNTIME_<IMG_NAME>/` directories |
 | 3. Bytecode analysis | ASM + SootUp | Application and runtime JARs | Native method and native binding records |
 | 4. Native mapping | Mapper + ELF tools | Native records + `.so` files | Java method -> native symbol -> library |
 | 5. Binary analysis | SysPart VFA | `.so` files + mapper starts; executables + entry/import starts | Syscall summaries per ELF |
@@ -90,11 +90,11 @@ Using both fields avoids missing JVM startup events when name attribution is inc
 ./scripts/sysdig_unified.sh <container_name_or_id> [duration_seconds]
 ```
 
-**Outputs** (in `sysdig_outputs_<IMG_SAFE>/`):
+**Outputs** (in `sysdig_outputs_<IMG_NAME>/`):
 
 - `jni_libs_opened.txt` -- deduplicated `.so` file paths
-- `jars_unique_<IMG_SAFE>.txt` -- deduplicated `.jar` file paths
-- `binaries_unique_<IMG_SAFE>.txt` -- deduplicated executable paths
+- `jars_unique_<IMG_NAME>.txt` -- deduplicated `.jar` file paths
+- `binaries_unique_<IMG_NAME>.txt` -- deduplicated executable paths
 - `libs_by_pid.txt` -- PID/process/library attribution
 
 `mmap` is monitored for completeness, but in the final evaluation captures the observed `.so` artifacts were discovered through `open`/`openat` events.
@@ -288,7 +288,7 @@ EchoTrace runs SysPart **once per analyzed ELF**: **`scripts/automate_syscall_an
   --binary-dir LIBS_cassandra/ \
   --startfunc-dir outputs_cassandra/ \
   --output-dir syscalls_output_cassandra/ \
-  --img-safe cassandra
+  --img-name cassandra
 ```
 
 ### SysPart Output (per library)
@@ -399,7 +399,7 @@ final_tool.sh
             -> scripts/merge_all_syscalls.py
 ```
 
-`final_tool.sh` is interactive: it lists running containers and asks for the target container ID/name. The per-image suffix `IMG_SAFE` is derived from the Docker image name, and all generated artifacts are written to image-scoped directories such as `JARFILES_<IMG_SAFE>/`, `LIBS_<IMG_SAFE>/`, `RUNTIME_<IMG_SAFE>/`, `outputs_<IMG_SAFE>/`, `syscalls_output_<IMG_SAFE>/`, and `syscalls_BIN_<IMG_SAFE>/`.
+`final_tool.sh` is interactive: it lists running containers and asks for the target container ID/name. The per-image suffix `IMG_NAME` is derived from the Docker image name, and all generated artifacts are written to image-scoped directories such as `JARFILES_<IMG_NAME>/`, `LIBS_<IMG_NAME>/`, `RUNTIME_<IMG_NAME>/`, `outputs_<IMG_NAME>/`, `syscalls_output_<IMG_NAME>/`, and `syscalls_BIN_<IMG_NAME>/`.
 
 ---
 
@@ -480,14 +480,14 @@ docker run -d --name my-app my-image:latest
 # Run the full analysis. The script prompts for the container ID/name.
 ./final_tool.sh
 
-# Result: syscalls_output_<IMG_SAFE>/<IMG_SAFE>.json
+# Result: syscalls_output_<IMG_NAME>/<IMG_NAME>.json
 docker run --security-opt seccomp=syscalls_output_my-image_latest/my-image_latest.json my-image:latest
 ```
 
 For a non-interactive rerun using already extracted artifacts:
 
 ```bash
-IMG_SAFE=my-image_latest SKIP_SYSDIG=1 ./scripts/run_analysis.sh
+IMG_NAME=my-image_latest SKIP_SYSDIG=1 ./scripts/run_analysis.sh
 ```
 
 ---

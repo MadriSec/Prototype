@@ -62,7 +62,6 @@ public class JnrFfiDetector {
     private static final String API_UNKNOWN             = "<?>";
 
     // Progress logging
-    private static final long HEARTBEAT_MS = 5000;
 
     // ---- Global taint maps (populated in PASS 1) ----
 

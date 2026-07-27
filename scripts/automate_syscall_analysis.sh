@@ -17,10 +17,10 @@
 # Options:
 #   --startfunc-dir <dir>    Directory containing start function files (default: ./outputs)
 #   --binary-dir <dir>       Directory containing ELF library files (default: ./LIBS)
-#   --binaries-dir <dir>     Directory containing executable binaries (auto-detected from --img-safe)
+#   --binaries-dir <dir>     Directory containing executable binaries (auto-detected from --img-name)
 #   --output-dir <dir>       Directory to store syscall results (default: ./syscalls_output)
 #   --syspart-dir <dir>      SysPartCode installation directory (default: ../SysPartCode)
-#   --img-safe <suffix>      Image safe name suffix (e.g., 33f67c1a1642)
+#   --img-name <suffix>      Image safe name suffix (e.g., 33f67c1a1642)
 #   --log                    Enable logging (creates logfile.txt for each binary)
 #   --help                   Show this help message
 #
@@ -38,7 +38,7 @@ BINARIES_DIR=""  # Will be auto-detected or set via --binaries-dir
 OUTPUT_BASE_DIR="$PROJECT_ROOT/syscalls_output"
 SYSPART_DIR="${SYSPART_DIR:-$PROJECT_ROOT/SysPartCode}"
 ENABLE_LOG=""
-IMG_SAFE=""  # Image safe name suffix (e.g., 33f67c1a1642)
+IMG_NAME=""  # Image safe name suffix (e.g., 33f67c1a1642)
 BINARIES_ONLY=""  # When set, skip library analysis and only process binaries
 
 # Color codes for output
@@ -113,16 +113,16 @@ log_message() {
 }
 
 #############################################################################
-# Function: auto_detect_img_safe
-# Description: Auto-detect IMG_SAFE suffix from directory names
+# Function: auto_detect_img_name
+# Description: Auto-detect IMG_NAME suffix from directory names
 #############################################################################
-auto_detect_img_safe() {
+auto_detect_img_name() {
     # Try to detect from outputs_* directories
     local outputs_dirs=("$PROJECT_ROOT"/outputs_*)
     if [ -d "${outputs_dirs[0]}" ]; then
         local dir_name=$(basename "${outputs_dirs[0]}")
-        IMG_SAFE="${dir_name#outputs_}"
-        log_message "INFO" "Auto-detected IMG_SAFE: $IMG_SAFE"
+        IMG_NAME="${dir_name#outputs_}"
+        log_message "INFO" "Auto-detected IMG_NAME: $IMG_NAME"
         return 0
     fi
 
@@ -130,8 +130,8 @@ auto_detect_img_safe() {
     local binaries_dirs=("$PROJECT_ROOT"/BINARIES_*)
     if [ -d "${binaries_dirs[0]}" ]; then
         local dir_name=$(basename "${binaries_dirs[0]}")
-        IMG_SAFE="${dir_name#BINARIES_}"
-        log_message "INFO" "Auto-detected IMG_SAFE from BINARIES: $IMG_SAFE"
+        IMG_NAME="${dir_name#BINARIES_}"
+        log_message "INFO" "Auto-detected IMG_NAME from BINARIES: $IMG_NAME"
         return 0
     fi
 
@@ -145,31 +145,31 @@ auto_detect_img_safe() {
 check_prerequisites() {
     log_message "INFO" "Checking prerequisites..."
 
-    # Auto-detect IMG_SAFE if not set
-    if [ -z "$IMG_SAFE" ]; then
-        auto_detect_img_safe
+    # Auto-detect IMG_NAME if not set
+    if [ -z "$IMG_NAME" ]; then
+        auto_detect_img_name
         if [ $? -ne 0 ]; then
-            log_message "WARNING" "Could not auto-detect IMG_SAFE suffix"
+            log_message "WARNING" "Could not auto-detect IMG_NAME suffix"
         fi
     fi
 
-    # Update directories based on IMG_SAFE
-    if [ -n "$IMG_SAFE" ]; then
+    # Update directories based on IMG_NAME
+    if [ -n "$IMG_NAME" ]; then
         if [[ "$STARTFUNC_DIR" == "$PROJECT_ROOT/outputs" ]]; then
-            STARTFUNC_DIR="$PROJECT_ROOT/outputs_$IMG_SAFE"
-            log_message "INFO" "Using IMG_SAFE-based startfunc dir: $STARTFUNC_DIR"
+            STARTFUNC_DIR="$PROJECT_ROOT/outputs_$IMG_NAME"
+            log_message "INFO" "Using IMG_NAME-based startfunc dir: $STARTFUNC_DIR"
         fi
         if [[ "$BINARY_DIR" == "$PROJECT_ROOT/LIBS" ]]; then
-            BINARY_DIR="$PROJECT_ROOT/LIBS_$IMG_SAFE"
-            log_message "INFO" "Using IMG_SAFE-based library dir: $BINARY_DIR"
+            BINARY_DIR="$PROJECT_ROOT/LIBS_$IMG_NAME"
+            log_message "INFO" "Using IMG_NAME-based library dir: $BINARY_DIR"
         fi
         if [ -z "$BINARIES_DIR" ]; then
-            BINARIES_DIR="$PROJECT_ROOT/BINARIES_$IMG_SAFE"
-            log_message "INFO" "Using IMG_SAFE-based binaries dir: $BINARIES_DIR"
+            BINARIES_DIR="$PROJECT_ROOT/BINARIES_$IMG_NAME"
+            log_message "INFO" "Using IMG_NAME-based binaries dir: $BINARIES_DIR"
         fi
         if [[ "$OUTPUT_BASE_DIR" == "$PROJECT_ROOT/syscalls_output" ]]; then
-            OUTPUT_BASE_DIR="$PROJECT_ROOT/syscalls_output_$IMG_SAFE"
-            log_message "INFO" "Using IMG_SAFE-based output dir for libraries: $OUTPUT_BASE_DIR"
+            OUTPUT_BASE_DIR="$PROJECT_ROOT/syscalls_output_$IMG_NAME"
+            log_message "INFO" "Using IMG_NAME-based output dir for libraries: $OUTPUT_BASE_DIR"
         fi
     fi
 
@@ -577,7 +577,7 @@ main() {
     log_message "INFO" "Binaries directory: ${BINARIES_DIR:-Not set}"
     log_message "INFO" "Output base directory: $OUTPUT_BASE_DIR"
     log_message "INFO" "SysPartCode directory: $SYSPART_DIR"
-    log_message "INFO" "IMG_SAFE suffix: ${IMG_SAFE:-Not set}"
+    log_message "INFO" "IMG_NAME suffix: ${IMG_NAME:-Not set}"
     log_message "INFO" "Logging enabled: $([ -n "$ENABLE_LOG" ] && echo "Yes" || echo "No")"
     echo ""
 
@@ -651,8 +651,8 @@ main() {
         log_message "INFO" "Binaries directory: $BINARIES_DIR"
 
         # Create separate output directory for binaries
-        local BINARY_OUTPUT_DIR="$PROJECT_ROOT/syscalls_BIN_$IMG_SAFE"
-        if [ -z "$IMG_SAFE" ]; then
+        local BINARY_OUTPUT_DIR="$PROJECT_ROOT/syscalls_BIN_$IMG_NAME"
+        if [ -z "$IMG_NAME" ]; then
             BINARY_OUTPUT_DIR="$PROJECT_ROOT/syscalls_binaries"
         fi
 
@@ -712,8 +712,8 @@ main() {
     fi
     log_message "INFO" "Libraries results saved to: $OUTPUT_BASE_DIR"
     if [ -n "$BINARIES_DIR" ] && [ -d "$BINARIES_DIR" ]; then
-        local BINARY_OUTPUT_DIR="$PROJECT_ROOT/syscalls_BIN_$IMG_SAFE"
-        if [ -z "$IMG_SAFE" ]; then
+        local BINARY_OUTPUT_DIR="$PROJECT_ROOT/syscalls_BIN_$IMG_NAME"
+        if [ -z "$IMG_NAME" ]; then
             BINARY_OUTPUT_DIR="$PROJECT_ROOT/syscalls_binaries"
         fi
         log_message "INFO" "Binaries results saved to: $BINARY_OUTPUT_DIR"
@@ -722,7 +722,7 @@ main() {
     #########################################################################
     # Merge syscalls and generate seccomp profile
     #########################################################################
-    if [ -n "$IMG_SAFE" ]; then
+    if [ -n "$IMG_NAME" ]; then
         echo ""
         echo ""
         log_message "INFO" "=== Merging Syscalls and Generating Seccomp Profile ==="
@@ -732,23 +732,23 @@ main() {
             log_message "WARNING" "merge_all_syscalls.py not found at: $merge_script"
             log_message "WARNING" "Skipping syscall merge and seccomp profile generation"
         else
-            log_message "INFO" "Running: python3 merge_all_syscalls.py $IMG_SAFE"
+            log_message "INFO" "Running: python3 merge_all_syscalls.py $IMG_NAME"
             echo ""
 
-            python3 "$merge_script" "$IMG_SAFE"
+            python3 "$merge_script" "$IMG_NAME"
             local merge_exit=$?
 
             echo ""
             if [ $merge_exit -eq 0 ]; then
                 log_message "SUCCESS" "Syscall merge and seccomp profile generation completed"
-                log_message "INFO" "Seccomp profile: $PROJECT_ROOT/syscalls_output_$IMG_SAFE/${IMG_SAFE}.json"
+                log_message "INFO" "Seccomp profile: $PROJECT_ROOT/syscalls_output_$IMG_NAME/${IMG_NAME}.json"
             else
                 log_message "ERROR" "Syscall merge failed (exit code: $merge_exit)"
                 log_message "WARNING" "Analysis results are still available in output directories"
             fi
         fi
     else
-        log_message "INFO" "IMG_SAFE not set, skipping syscall merge and seccomp profile generation"
+        log_message "INFO" "IMG_NAME not set, skipping syscall merge and seccomp profile generation"
     fi
 
     if [ $failure_count -gt 0 ]; then
@@ -783,8 +783,8 @@ while [[ $# -gt 0 ]]; do
             SYSPART_DIR="$2"
             shift 2
             ;;
-        --img-safe)
-            IMG_SAFE="$2"
+        --img-name)
+            IMG_NAME="$2"
             shift 2
             ;;
         --log)
