@@ -27,3 +27,9 @@ __pycache__/
 
 # Maven shade plugin output
 dependency-reduced-pom.xml
+
+# Unanalysed-library analysis outputs
+startfuncs_unanalysed_*/
+syscalls_unanalysed_*/
+dynamic_leftover_after_analyzed_ldd.*
+unanalysed_syspart_progress.log

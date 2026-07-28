@@ -171,3 +171,32 @@ echo "============================================================"
 echo " STEP 6: Running combine_syscalls.sh"
 # bash "${SCRIPT_DIR}/combine_syscalls.sh "${SYSCALLS_OUT_DIR}"
 echo "============================================================"
+
+# =============================================================================
+# STEP 7: Unanalysed dynamically loaded libraries (opt-in)
+# =============================================================================
+# Libraries the container loads at runtime that no Java native binding reaches
+# are invisible to the bytecode-driven pipeline, so their syscalls never enter
+# the profile. Enable with ANALYZE_UNANALYSED=1.
+#
+# This runs SysPart over every exported function of each such library, which is
+# significantly slower than the main analysis, so it is off by default.
+if [ "${ANALYZE_UNANALYSED:-0}" = "1" ]; then
+    echo "============================================================"
+    echo " STEP 7: Analysing unanalysed dynamically loaded libraries"
+    echo "============================================================"
+
+    IMG_NAME="${IMG_NAME}" python3 "${SCRIPT_DIR}/report_dynamic_leftover_after_analyzed_ldd.py" \
+      --libs-dir "${LIBS_BASE_DIR}" \
+      --syscalls-dir "${SYSCALLS_OUT_DIR}"
+
+    IMG_NAME="${IMG_NAME}" python3 "${SCRIPT_DIR}/analyze_unanalysed_loaded_libs.py" \
+      --libs-dir "${LIBS_BASE_DIR}" \
+      --run-syspart
+
+    echo "============================================================"
+    echo " Unanalysed library analysis completed!"
+    echo "============================================================"
+else
+    echo "Skipping unanalysed-library analysis (set ANALYZE_UNANALYSED=1 to enable)"
+fi
