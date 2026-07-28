@@ -498,6 +498,33 @@ For a non-interactive rerun using already extracted artifacts:
 IMG_NAME=my-image_latest SKIP_SYSDIG=1 ./scripts/run_analysis.sh
 ```
 
+### Example: Tomcat 9
+
+A complete run against a public image, useful for checking the setup end to end:
+
+```bash
+# 1. Pull and start the target container
+docker pull tomcat:9.0.120-jdk8-corretto-al2
+
+docker run -d \
+  --name tomcat9 \
+  -p 8080:8080 \
+  tomcat:9.0.120-jdk8-corretto-al2
+
+# 2. Capture, extract and analyse. The script prompts for the container,
+#    answer: tomcat9
+./final_tool.sh
+
+# 3. Apply the generated profile to a fresh container
+docker run -d --name tomcat9-seccomp -p 8081:8080 \
+  --security-opt seccomp=syscalls_output_tomcat_9.0.120-jdk8-corretto-al2/tomcat_9.0.120-jdk8-corretto-al2.json \
+  tomcat:9.0.120-jdk8-corretto-al2
+```
+
+The container must be running before `final_tool.sh` starts: the dynamic
+capture stops it, attaches the eBPF probes, then restarts it so the JVM
+startup window is recorded.
+
 ---
 
 ## Evaluation Results Snapshot
