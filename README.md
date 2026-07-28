@@ -450,7 +450,15 @@ python3 -m pip install --user pyelftools
 
 If your host has a different GCC runtime, replace `libstdc++6-12-dbg` with the matching `libstdc++6-<version>-dbg` package.
 
-Clone with submodules, or initialize them after cloning:
+Clone the repository together with the SysPart submodule:
+
+```bash
+git clone --recurse-submodules https://github.com/MadriSec/EchoTrace.git
+cd EchoTrace
+```
+
+If you already cloned without `--recurse-submodules`, initialize the submodule
+from inside the repository:
 
 ```bash
 git submodule update --init --recursive
