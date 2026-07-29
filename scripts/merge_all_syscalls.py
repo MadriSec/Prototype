@@ -10,11 +10,15 @@ This script:
   4. Parses syscalls_LIBS_<IMG_NAME>/<library>/syscalls.txt files
   5. Reports empty syscalls.txt files in libraries
   6. Creates library_syscalls.txt with unique syscalls from all libraries
-  7. Merges with runc.txt default whitelist (if present)
-  8. Creates <IMG_NAME>.txt with combined syscalls (no duplicates)
-  9. Generates <IMG_NAME>.json seccomp profile from combined syscalls
+  7. Parses syscalls_unanalysed_<IMG_NAME>/**/syscalls.txt (dynamically loaded
+     libraries that no Java binding reaches; see
+     scripts/analyze_unanalysed_loaded_libs.py)
+  8. Includes jna_ffi_analysis/union_syscalls.txt when present
+  9. Merges with runc.txt default whitelist (if present)
+ 10. Creates <IMG_NAME>.txt with combined syscalls (no duplicates)
+ 11. Generates <IMG_NAME>.json seccomp profile from combined syscalls
 
-Usage: ./merge_all_syscalls.py <IMG_NAME>
+Usage: ./merge_all_syscalls.py <IMG_NAME> [--skip-unanalysed] [--skip-jna-ffi]
 
 Example:
   ./merge_all_syscalls.py jetty_9.4.58-jdk8-amazoncorretto
@@ -105,6 +109,40 @@ def process_directory(base_dir: Path, dir_type: str) -> Tuple[Set[str], List[str
     return all_syscalls, empty_files, missing_files
 
 
+def process_syscall_tree(base_dir: Path, dir_type: str) -> Tuple[Set[str], List[str], List[str]]:
+    """
+    Recursively collect every syscalls.txt below a directory.
+
+    Unlike process_directory(), which expects one level of per-library
+    subdirectories, the unanalysed-library outputs mirror the LIBS_ tree and
+    can nest arbitrarily deep.
+    """
+    all_syscalls = set()
+    empty_files = []
+    missing_files = []
+
+    if not base_dir.exists():
+        print(f"Warning: Directory does not exist: {base_dir}")
+        return all_syscalls, empty_files, missing_files
+
+    syscall_files = sorted(base_dir.rglob("syscalls.txt"))
+    print(f"\n[Processing {dir_type}]")
+    print(f"Directory: {base_dir}")
+    print(f"Found {len(syscall_files)} syscalls.txt files")
+
+    for syscalls_file in syscall_files:
+        relative_parent = str(syscalls_file.parent.relative_to(base_dir))
+        syscalls = read_syscalls_file(syscalls_file)
+        if syscalls:
+            print(f"  {relative_parent}: {len(syscalls)} syscalls")
+            all_syscalls.update(syscalls)
+        else:
+            print(f"  {relative_parent}: syscalls.txt EMPTY (0 syscalls)")
+            empty_files.append(relative_parent)
+
+    return all_syscalls, empty_files, missing_files
+
+
 def write_syscalls_file(filepath: Path, syscalls: Set[str]):
     """Write syscalls to a file, sorted alphabetically."""
     try:
@@ -149,14 +187,21 @@ def write_seccomp_profile(filepath: Path, syscalls: Set[str]):
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: ./merge_all_syscalls.py <IMG_NAME>")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    unknown = flags - {"--skip-unanalysed", "--skip-jna-ffi"}
+    if len(args) != 1 or unknown:
+        if unknown:
+            print(f"Unknown option(s): {', '.join(sorted(unknown))}")
+        print("Usage: ./merge_all_syscalls.py <IMG_NAME> [--skip-unanalysed] [--skip-jna-ffi]")
         print("")
         print("Example:")
         print("  ./merge_all_syscalls.py jetty_9.4.58-jdk8-amazoncorretto")
         sys.exit(1)
 
-    img_name = sys.argv[1]
+    img_name = args[0]
+    skip_unanalysed = "--skip-unanalysed" in flags
+    skip_jna_ffi = "--skip-jna-ffi" in flags
     script_dir = Path(__file__).resolve().parent
     project_root = script_dir.parent if script_dir.name == "scripts" else script_dir
 
@@ -225,10 +270,60 @@ def main():
         print("  ⚠ No syscalls found in any library, skipping library_syscalls.txt")
 
     # =========================================================================
-    # STEP 3: Load runc.txt Default Whitelist
+    # STEP 3: Process Unanalysed Dynamically Loaded Libraries
     # =========================================================================
     print("\n" + "="*70)
-    print("STEP 3: Loading runc.txt Default Whitelist")
+    print("STEP 3: Processing Unanalysed Dynamically Loaded Libraries")
+    print("="*70)
+
+    unanalysed_dir = project_root / f"syscalls_unanalysed_{img_name}"
+    unanalysed_syscalls = set()
+
+    if skip_unanalysed:
+        print("\nSkipping unanalysed-library syscalls (--skip-unanalysed).")
+    else:
+        unanalysed_syscalls, unanalysed_empty, _ = process_syscall_tree(
+            unanalysed_dir, "Unanalysed dynamically loaded libraries"
+        )
+        if unanalysed_empty:
+            print(f"\n⚠ Warning: {len(unanalysed_empty)} unanalysed libraries with EMPTY syscalls.txt")
+        if unanalysed_dir.exists():
+            write_syscalls_file(unanalysed_dir / "unanalysed_syscalls.txt", unanalysed_syscalls)
+        else:
+            print(f"\n  No unanalysed-library output at {unanalysed_dir}")
+            print("  Run scripts/analyze_unanalysed_loaded_libs.py --run-syspart to generate it.")
+
+    # =========================================================================
+    # STEP 4: Load JNA/FFI Reachable Syscalls
+    # =========================================================================
+    print("\n" + "="*70)
+    print("STEP 4: Loading JNA/FFI Reachable Syscalls")
+    print("="*70)
+
+    jna_ffi_syscalls = set()
+    jna_ffi_candidates = [
+        project_root / "jna_ffi_analysis" / "union_syscalls.txt",
+        project_root / "jna_ffi_analysis" / "full_deps" / "union_syscalls.txt",
+    ]
+
+    if skip_jna_ffi:
+        print("\nSkipping JNA/FFI syscall union (--skip-jna-ffi).")
+    else:
+        jna_ffi_path = next((p for p in jna_ffi_candidates if p.exists()), None)
+        if jna_ffi_path:
+            print(f"\nReading JNA/FFI syscall union from: {jna_ffi_path}")
+            jna_ffi_syscalls = read_syscalls_file(jna_ffi_path)
+            print(f"  ✓ Loaded {len(jna_ffi_syscalls)} syscalls from JNA/FFI analysis")
+        else:
+            print("\nNo JNA/FFI syscall union found. Looked for:")
+            for candidate in jna_ffi_candidates:
+                print(f"    - {candidate}")
+
+    # =========================================================================
+    # STEP 5: Load runc.txt Default Whitelist
+    # =========================================================================
+    print("\n" + "="*70)
+    print("STEP 5: Loading runc.txt Default Whitelist")
     print("="*70)
 
     runc_whitelist_path = project_root / "runc.txt"
@@ -243,23 +338,34 @@ def main():
         print("  Continuing without default whitelist...")
 
     # =========================================================================
-    # STEP 4: Create Combined Syscalls File
+    # STEP 6: Create Combined Syscalls File
     # =========================================================================
     print("\n" + "="*70)
-    print("STEP 4: Creating Combined Syscalls File")
+    print("STEP 6: Creating Combined Syscalls File")
     print("="*70)
 
     # Combine all sets (set union automatically removes duplicates)
-    # Order: binary + library + runc whitelist
-    combined_syscalls = binary_syscalls | library_syscalls | runc_syscalls
+    # Order: binary + library + unanalysed library + JNA/FFI + runc whitelist
+    combined_syscalls = (binary_syscalls | library_syscalls | unanalysed_syscalls
+                         | jna_ffi_syscalls | runc_syscalls)
 
-    print(f"\nBinary syscalls:   {len(binary_syscalls)}")
-    print(f"Library syscalls:  {len(library_syscalls)}")
-    print(f"Runc whitelist:    {len(runc_syscalls)}")
-    print(f"Combined (unique): {len(combined_syscalls)}")
+    print(f"\nBinary syscalls:      {len(binary_syscalls)}")
+    print(f"Library syscalls:     {len(library_syscalls)}")
+    print(f"Unanalysed libraries: {len(unanalysed_syscalls)}")
+    print(f"JNA/FFI syscalls:     {len(jna_ffi_syscalls)}")
+    print(f"Runc whitelist:       {len(runc_syscalls)}")
+    print(f"Combined (unique):    {len(combined_syscalls)}")
 
-    # Calculate what runc.txt adds
-    before_runc = len(binary_syscalls | library_syscalls)
+    # Report what each additional source contributes beyond binary + library
+    base = binary_syscalls | library_syscalls
+    added_by_unanalysed = len(base | unanalysed_syscalls) - len(base)
+    if added_by_unanalysed > 0:
+        print(f"  → unanalysed libraries added {added_by_unanalysed} additional syscalls")
+    base_u = base | unanalysed_syscalls
+    added_by_jna_ffi = len(base_u | jna_ffi_syscalls) - len(base_u)
+    if added_by_jna_ffi > 0:
+        print(f"  → JNA/FFI analysis added {added_by_jna_ffi} additional syscalls")
+    before_runc = len(base_u | jna_ffi_syscalls)
     added_by_runc = len(combined_syscalls) - before_runc
     if added_by_runc > 0:
         print(f"  → runc.txt added {added_by_runc} additional syscalls")
@@ -273,10 +379,10 @@ def main():
         print("  ⚠ No syscalls found, skipping combined file")
 
     # =========================================================================
-    # STEP 5: Generate Seccomp Profile
+    # STEP 7: Generate Seccomp Profile
     # =========================================================================
     print("\n" + "="*70)
-    print("STEP 5: Generating Seccomp Profile")
+    print("STEP 7: Generating Seccomp Profile")
     print("="*70)
 
     if combined_syscalls:
