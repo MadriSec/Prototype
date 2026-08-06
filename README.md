@@ -525,6 +525,84 @@ The container must be running before `final_tool.sh` starts: the dynamic
 capture stops it, attaches the eBPF probes, then restarts it so the JVM
 startup window is recorded.
 
+### Re-analysing a single library
+
+Recomputing one artifact through the full pipeline means redoing the bytecode
+and mapping stages, which take far longer than the SysPart run itself.
+`analyse_lib.sh` runs SysPart against one library or binary of an image that
+has already been extracted and mapped:
+
+```bash
+IMG_NAME=tomcat_9.0.120-jdk8-corretto-al2 LIB_ANALYSE=libnet.so \
+  ./scripts/analyse_lib.sh
+```
+
+`LIB_ANALYSE` takes the artifact name. The plain soname works: `libnet.so`
+matches a versioned file when no exact match exists, and the start-function
+file is located under `outputs_<IMG_NAME>/` by filename regardless of how
+deeply the mirror nests it.
+
+| Variable | Purpose |
+|----------|---------|
+| `IMG_NAME` | Required. Selects `LIBS_`, `outputs_` and `syscalls_output_` |
+| `LIB_ANALYSE` | Required. Library or binary name, e.g. `libnet.so` |
+| `STARTFUNC_FILE` | Use a specific start-function file instead of the derived one |
+| `OUTPUT_DIR` | Write results somewhere other than `syscalls_output_<IMG_NAME>/<lib>` |
+| `FORCE=1` | Skip the notice about overwriting existing output |
+
+Results go to `syscalls_output_<IMG_NAME>/<lib>/`, so regenerate the profile
+afterwards:
+
+```bash
+python3 scripts/merge_all_syscalls.py tomcat_9.0.120-jdk8-corretto-al2
+```
+
+`compute_syscalls.sh` exits successfully even when it produces nothing, so the
+wrapper reports which of the two silent failures occurred.
+
+**Empty call graph.** SysPart could not load the artifact or its dependencies.
+Extraction copies symlink targets rather than the symlinks themselves, so a
+library may exist only under its versioned filename while another library's
+`DT_NEEDED` entry asks for its soname -- `libtcnative` needs `libssl.so.1.1`,
+but only `libssl.so.1.1.1zh` was extracted. Inspect with
+`readelf -d <lib> | grep -i NEEDED`, then recreate the missing links:
+
+```bash
+cd LIBS_<IMG_NAME>
+while IFS= read -r f; do
+  sn=$(readelf -d "$f" 2>/dev/null | sed -n 's/.*soname *: *\[\(.*\)\].*/\1/p')
+  [ -n "$sn" ] || continue
+  d=$(dirname "$f"); b=$(basename "$f")
+  [ "$sn" = "$b" ] && continue
+  [ -e "$d/$sn" ] || ln -s "$b" "$d/$sn"
+done < <(find . -type f -name "*.so*")
+```
+
+Verify the links resolve:
+
+```bash
+for l in *.so*; do
+  [ -L "$l" ] && { [ -f "$l" ] && echo "OK   $l -> $(readlink $l)" || echo "DEAD $l"; }
+done
+```
+
+Do not use `ldd` to check this. It searches `/lib`, `/usr/lib` and
+`ld.so.cache`, never the mirror, so it reports these dependencies as missing
+even when they resolve correctly for SysPart -- and it silently substitutes
+host libraries of the wrong version for the ones it does find. To see real
+resolution, invoke the loader directly:
+
+```bash
+LD_LIBRARY_PATH="$PWD" /lib64/ld-linux-x86-64.so.2 --list ./<lib>
+```
+
+Never export `LD_LIBRARY_PATH` to the mirror in your shell: the container's
+glibc will replace the host's and break unrelated binaries. SysPart uses its
+own `USER_LIBRARY_PATH` and is unaffected.
+
+**Call graph built, but no syscalls attributed.** The start-function names were
+not found in `allfunctions.txt`, leaving `startfuncs_with_addr.txt` empty.
+
 ---
 
 ## Evaluation Results Snapshot
