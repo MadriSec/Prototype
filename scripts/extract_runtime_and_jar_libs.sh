@@ -66,3 +66,11 @@ echo "LIB destination: $LIBS_DIR"
 
 bash "${SCRIPT_DIR}/extract_libs_jars.sh" "$JARFILES_DIR" "$LIBS_DIR"
 
+
+echo "============================================================"
+echo " Restoring SONAME symlinks"
+echo "============================================================"
+# Extraction copies symlink targets rather than the symlinks, so libraries
+# arrive without the soname other ELFs link against. Delegated so the same
+# logic can be re-run standalone against an already-extracted mirror.
+bash "${SCRIPT_DIR}/relink_sonames.sh" "$LIBS_DIR"
