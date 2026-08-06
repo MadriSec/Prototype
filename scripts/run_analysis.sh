@@ -173,15 +173,17 @@ echo " STEP 6: Running combine_syscalls.sh"
 echo "============================================================"
 
 # =============================================================================
-# STEP 7: Unanalysed dynamically loaded libraries (opt-in)
+# STEP 7: Unanalysed dynamically loaded libraries
 # =============================================================================
 # Libraries the container loads at runtime that no Java native binding reaches
-# are invisible to the bytecode-driven pipeline, so their syscalls never enter
-# the profile. Enable with ANALYZE_UNANALYSED=1.
+# are invisible to the bytecode-driven pipeline. Skipping them leaves their
+# syscalls out of the profile, and a syscall missing from a default-deny
+# profile is a SIGSYS at runtime -- so this runs as part of every analysis.
 #
-# This runs SysPart over every exported function of each such library, which is
-# significantly slower than the main analysis, so it is off by default.
-if [ "${ANALYZE_UNANALYSED:-0}" = "1" ]; then
+# It is slower than the main analysis, since SysPart is run over every exported
+# function of each unmapped library. Set ANALYZE_UNANALYSED=0 to skip it when
+# iterating on an earlier stage; the resulting profile is then incomplete.
+if [ "${ANALYZE_UNANALYSED:-1}" != "0" ]; then
     echo "============================================================"
     echo " STEP 7: Analysing unanalysed dynamically loaded libraries"
     echo "============================================================"
@@ -198,5 +200,10 @@ if [ "${ANALYZE_UNANALYSED:-0}" = "1" ]; then
     echo " Unanalysed library analysis completed!"
     echo "============================================================"
 else
-    echo "Skipping unanalysed-library analysis (set ANALYZE_UNANALYSED=1 to enable)"
+    echo "============================================================"
+    echo " STEP 7: SKIPPED (ANALYZE_UNANALYSED=0)"
+    echo "============================================================"
+    echo "Dynamically loaded libraries with no Java binding were not analysed."
+    echo "Syscalls reachable only from those libraries are missing from the"
+    echo "generated profile, which may cause SIGSYS at runtime."
 fi
