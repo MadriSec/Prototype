@@ -133,71 +133,35 @@ bash "${SCRIPT_DIR}/scripts/run_analysis.sh"
 
 echo ""
 echo "============================================================"
-echo " STEP 4: Organizing results into results/${IMG_NAME}/"
+echo " STEP 4: Organizing results"
 echo "============================================================"
 
-# RESULTS_DIR="${SCRIPT_DIR}/results/${IMG_NAME}"
-# mkdir -p "$RESULTS_DIR/Binary_Analysis" \
-#          "$RESULTS_DIR/ByteCode_Analysis" \
-#          "$RESULTS_DIR/Dynamic_Analysis" \
-#          "$RESULTS_DIR/Extracted_Data"
+# Collect this image's artifacts under Final_results/<IMG_NAME>/ so the run can
+# be archived or compared as a unit. Set ORGANIZE_RESULTS=0 to leave them at the
+# repository root.
+#
+# Note this MOVES the directories. Anything re-run afterwards against the same
+# image -- analyse_lib.sh, merge_all_syscalls.py, run_analysis.sh with
+# SKIP_BYTECODE_ANALYSIS -- needs its paths pointed into Final_results/, or the
+# artifacts moved back first.
+if [ "${ORGANIZE_RESULTS:-1}" != "0" ]; then
+    bash "${SCRIPT_DIR}/scripts/organize_results.sh" "$IMG_NAME"
 
-# BASE="${SCRIPT_DIR}"
+    RESULTS_DIR="${SCRIPT_DIR}/Final_results/${IMG_NAME}"
+    PROFILE="${RESULTS_DIR}/Binary_Analysis/syscalls_output_${IMG_NAME}/${IMG_NAME}.json"
 
-# # --- Binary_Analysis ---
-# for dir in "syscalls_BIN_${IMG_NAME}" "syscalls_LIBS_${IMG_NAME}" "syscalls_output_${IMG_NAME}"; do
-#     src="$BASE/$dir"
-#     if [ -d "$src" ]; then
-#         echo "  Moving $dir → Binary_Analysis/"
-#         mv "$src" "$RESULTS_DIR/Binary_Analysis/"
-#     fi
-# done
-
-# # --- ByteCode_Analysis ---
-# src="$BASE/outputs_${IMG_NAME}"
-# if [ -d "$src" ] && [ ! -L "$src" ]; then
-#     echo "  Moving outputs_${IMG_NAME} → ByteCode_Analysis/"
-#     mv "$src" "$RESULTS_DIR/ByteCode_Analysis/"
-# elif [ -L "$src" ]; then
-#     # outputs_${IMG_NAME} might be the real dir pointed to by the 'outputs' symlink
-#     real_src="$(readlink -f "$src")"
-#     if [ -d "$real_src" ]; then
-#         rm -f "$src"  # remove symlink first
-#         echo "  Moving outputs_${IMG_NAME} → ByteCode_Analysis/"
-#         mv "$real_src" "$RESULTS_DIR/ByteCode_Analysis/"
-#     fi
-# fi
-# # Clean up the generic 'outputs' symlink if it still exists
-# rm -f "$BASE/outputs" 2>/dev/null || true
-
-# # --- Dynamic_Analysis ---
-# src="$BASE/sysdig_outputs_${IMG_NAME}"
-# if [ -d "$src" ]; then
-#     echo "  Moving sysdig_outputs_${IMG_NAME} → Dynamic_Analysis/"
-#     mv "$src" "$RESULTS_DIR/Dynamic_Analysis/"
-# fi
-
-# # --- Extracted_Data ---
-# for dir in "BINARIES_${IMG_NAME}" "JARFILES_${IMG_NAME}" "LIBS_${IMG_NAME}"; do
-#     src="$BASE/$dir"
-#     if [ -d "$src" ]; then
-#         echo "  Moving $dir → Extracted_Data/"
-#         mv "$src" "$RESULTS_DIR/Extracted_Data/"
-#     fi
-# done
-
-# echo ""
-# echo "============================================================"
-# echo " Final Tool Analysis Complete!"
-# echo "============================================================"
-# echo "Results organized in: $RESULTS_DIR/"
-# echo ""
-# echo "  Binary_Analysis/"
-# ls -1d "$RESULTS_DIR/Binary_Analysis"/*/ 2>/dev/null | xargs -I{} basename {} | sed 's/^/    /'
-# echo "  ByteCode_Analysis/"
-# ls -1d "$RESULTS_DIR/ByteCode_Analysis"/*/ 2>/dev/null | xargs -I{} basename {} | sed 's/^/    /'
-# echo "  Dynamic_Analysis/"
-# ls -1d "$RESULTS_DIR/Dynamic_Analysis"/*/ 2>/dev/null | xargs -I{} basename {} | sed 's/^/    /'
-# echo "  Extracted_Data/"
-# ls -1d "$RESULTS_DIR/Extracted_Data"/*/ 2>/dev/null | xargs -I{} basename {} | sed 's/^/    /'
-# echo "============================================================"
+    echo ""
+    echo "============================================================"
+    echo " Final Tool Analysis Complete!"
+    echo "============================================================"
+    echo "Results: ${RESULTS_DIR}/"
+    if [ -f "$PROFILE" ]; then
+        echo "Profile: ${PROFILE}"
+        echo ""
+        echo "Apply it with:"
+        echo "  docker run --security-opt seccomp=${PROFILE} <image>"
+    fi
+    echo "============================================================"
+else
+    echo "Skipped (ORGANIZE_RESULTS=0); artifacts remain at the repository root."
+fi
