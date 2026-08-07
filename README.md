@@ -569,8 +569,9 @@ docker run -d --name my-app my-image:latest
 # Remove the analysed container before reusing the name
 docker rm -f my-app
 
-# Result: syscalls_output_<IMG_NAME>/<IMG_NAME>.json
-docker run --security-opt seccomp=syscalls_output_my-image_latest/my-image_latest.json my-image:latest
+# Result: Final_results/<IMG_NAME>/Binary_Analysis/syscalls_output_<IMG_NAME>/<IMG_NAME>.json
+# final_tool.sh prints the full path when it finishes.
+docker run --security-opt seccomp=$PWD/Final_results/my-image_latest/Binary_Analysis/syscalls_output_my-image_latest/my-image_latest.json my-image:latest
 ```
 
 For a non-interactive rerun using already extracted artifacts:
@@ -602,7 +603,7 @@ docker rm -f tomcat9
 docker run -d \
   --name tomcat9-seccomp \
   -p 8080:8080 \
-  --security-opt seccomp=syscalls_output_tomcat_9.0.120-jdk8-corretto-al2/tomcat_9.0.120-jdk8-corretto-al2.json \
+  --security-opt seccomp=$PWD/Final_results/tomcat_9.0.120-jdk8-corretto-al2/Binary_Analysis/syscalls_output_tomcat_9.0.120-jdk8-corretto-al2/tomcat_9.0.120-jdk8-corretto-al2.json \
   tomcat:9.0.120-jdk8-corretto-al2
 ```
 
