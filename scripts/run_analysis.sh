@@ -207,3 +207,36 @@ else
     echo "Syscalls reachable only from those libraries are missing from the"
     echo "generated profile, which may cause SIGSYS at runtime."
 fi
+
+# =============================================================================
+# STEP 8: JNA / jnr-ffi / FFM bindings
+# =============================================================================
+# The bytecode detectors resolve these bindings to a (library, symbol) pair,
+# but the mapper only consumes native_methods.txt -- the plain `native`-keyword
+# scan -- so those symbols were never seeded as SysPart entry points and no
+# syscall reachable only through them entered the profile.
+#
+# Runs SysPart over each bound library using its bound symbols as start
+# functions, and writes jna_ffi_analysis/union_syscalls.txt, which
+# merge_all_syscalls.py reads. Set ANALYZE_JNA_FFI=0 to skip; the resulting
+# profile then omits whatever those bindings reach.
+if [ "${ANALYZE_JNA_FFI:-1}" != "0" ]; then
+    echo "============================================================"
+    echo " STEP 8: Analysing JNA / jnr-ffi / FFM bindings"
+    echo "============================================================"
+
+    IMG_NAME="${IMG_NAME}" python3 "${SCRIPT_DIR}/analyse_jna_ffi.py" \
+      --libs-dir "${LIBS_BASE_DIR}" \
+      --outputs-dir "${STARTFUNCS_DIR}" \
+      --run-syspart
+
+    echo "============================================================"
+    echo " JNA/FFI binding analysis completed!"
+    echo "============================================================"
+else
+    echo "============================================================"
+    echo " STEP 8: SKIPPED (ANALYZE_JNA_FFI=0)"
+    echo "============================================================"
+    echo "JNA, jnr-ffi and FFM bindings were not analysed. Syscalls reachable"
+    echo "only through those bindings are missing from the generated profile."
+fi
