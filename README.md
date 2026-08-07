@@ -584,6 +584,7 @@ A complete run against a public image, useful for checking the setup end to end:
 # 1. Pull and start the target container
 docker pull tomcat:9.0.120-jdk8-corretto-al2
 
+docker rm -f tomcat9 2>/dev/null || true
 docker run -d \
   --name tomcat9 \
   -p 8080:8080 \
@@ -594,10 +595,77 @@ docker run -d \
 ./final_tool.sh
 
 # 3. Apply the generated profile to a fresh container
+docker rm -f tomcat9-seccomp 2>/dev/null || true
 docker run -d --name tomcat9-seccomp -p 8081:8080 \
   --security-opt seccomp=syscalls_output_tomcat_9.0.120-jdk8-corretto-al2/tomcat_9.0.120-jdk8-corretto-al2.json \
   tomcat:9.0.120-jdk8-corretto-al2
+
+# 4. Check that it survived startup under the profile
+docker ps --filter name=tomcat9-seccomp          # Up, not Restarting
+docker logs tomcat9-seccomp | tail -20           # no "Operation not permitted"
+curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:8081/
 ```
+
+Each `docker run` is preceded by `docker rm -f` so the example can be re-run;
+without it Docker refuses the second attempt with "container name already in
+use". Step 3 deliberately starts a second container on a different host port
+rather than reusing `tomcat9`, so the unrestricted original stays available for
+comparison.
+
+Step 4 matters because a profile that is missing a syscall does not fail
+loudly. Generated profiles use `SCMP_ACT_ERRNO`, so a denied call returns an
+error rather than being logged and killed -- nothing appears in `dmesg`, and
+the failure surfaces as whatever the caller does with the unexpected `EPERM`.
+
+Two distinct failures are worth telling apart.
+
+**The application dies once it is running.** The container starts, then exits
+or misbehaves when it first reaches the missing call. `docker logs` usually
+shows the error, and `docker inspect <name> --format '{{.State.ExitCode}}'`
+reports 159 (128 + `SIGSYS`) if the kernel killed it. This means the workload
+exercised a path the capture window never triggered; extend the capture or
+drive more of the application while it runs.
+
+**The container never starts at all.** `docker ps -a` shows it stuck in
+`Created`, and `docker run` reports something unrelated-looking:
+
+```
+docker: Error response from daemon: bind-mount /proc/<pid>/ns/net -> ... no such file or directory
+```
+
+with `docker logs` showing a runtime crash rather than an application error:
+
+```
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation]
+github.com/opencontainers/runc/libcontainer.startInitialization.func1()
+```
+
+This is the **container runtime**, not the application. `runc` sets up the
+container -- mounting the filesystem, pivoting the root, initialising the first
+process -- before the entrypoint runs, and it needs its own syscalls. When the
+profile denies one, `runc` receives `EPERM` where it does not expect it and
+crashes, so the visible error describes networking rather than seccomp.
+
+Check the base set directly:
+
+```bash
+python3 - <<'EOF'
+import json
+p = "syscalls_output_<IMG_NAME>/<IMG_NAME>.json"
+names = set(json.load(open(p))["syscalls"][0]["names"])
+need = ["execve", "clone", "fork", "mount", "pivot_root", "capset",
+        "setuid", "setgid", "chdir", "openat", "read", "write", "mmap",
+        "exit_group", "futex", "prctl", "arch_prctl", "set_tid_address"]
+print("missing:", [s for s in need if s not in names] or "none")
+EOF
+```
+
+Anything reported here comes from the runtime baseline rather than the
+application analysis. That baseline is `runc.txt`, merged in as a fixed set;
+if it does not match the runtime in use -- Docker and `runc` versions differ in
+which syscalls they need during init -- regenerate it by analysing the
+`runc`, `containerd` and `dockerd` binaries on the host and replacing the file.
 
 The container must be running before `final_tool.sh` starts: the dynamic
 capture stops it, attaches the eBPF probes, then restarts it so the JVM
