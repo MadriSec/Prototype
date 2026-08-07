@@ -36,3 +36,6 @@ unanalysed_syspart_progress.log
 
 # JNA/FFI binding analysis outputs
 jna_ffi_analysis/
+
+# Collected per-image results (organize_results.sh)
+Final_results/
