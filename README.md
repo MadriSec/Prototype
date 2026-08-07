@@ -596,9 +596,12 @@ docker run -d \
 #    answer: tomcat9
 ./final_tool.sh
 
-# 3. Apply the generated profile to a fresh container
-docker rm -f tomcat9-seccomp
-docker run -d --name tomcat9-seccomp -p 8081:8080 \
+# 3. Remove the analysed container and start a new one under the profile
+docker rm -f tomcat9
+
+docker run -d \
+  --name tomcat9-seccomp \
+  -p 8080:8080 \
   --security-opt seccomp=syscalls_output_tomcat_9.0.120-jdk8-corretto-al2/tomcat_9.0.120-jdk8-corretto-al2.json \
   tomcat:9.0.120-jdk8-corretto-al2
 ```
