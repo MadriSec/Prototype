@@ -566,6 +566,9 @@ docker run -d --name my-app my-image:latest
 # Run the full analysis. The script prompts for the container ID/name.
 ./final_tool.sh
 
+# Remove the analysed container before reusing the name
+docker rm -f my-app
+
 # Result: syscalls_output_<IMG_NAME>/<IMG_NAME>.json
 docker run --security-opt seccomp=syscalls_output_my-image_latest/my-image_latest.json my-image:latest
 ```
@@ -594,6 +597,7 @@ docker run -d \
 ./final_tool.sh
 
 # 3. Apply the generated profile to a fresh container
+docker rm -f tomcat9-seccomp
 docker run -d --name tomcat9-seccomp -p 8081:8080 \
   --security-opt seccomp=syscalls_output_tomcat_9.0.120-jdk8-corretto-al2/tomcat_9.0.120-jdk8-corretto-al2.json \
   tomcat:9.0.120-jdk8-corretto-al2
