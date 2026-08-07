@@ -33,3 +33,6 @@ startfuncs_unanalysed_*/
 syscalls_unanalysed_*/
 dynamic_leftover_after_analyzed_ldd.*
 unanalysed_syspart_progress.log
+
+# JNA/FFI binding analysis outputs
+jna_ffi_analysis/
