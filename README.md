@@ -436,19 +436,97 @@ Host tools used by the pipeline:
 - ELF/native utilities: `binutils` (`nm`, `objdump`, `readelf`), `file`, `ldd`, `unzip`, `make`, `g++`, `gdb`, `libreadline-dev`, `libunwind-dev`, and debug libc/libstdc++ packages for better SysPart results
 - SysPart submodule checked out at `SysPartCode/` for binary analysis ([optimizations branch](https://github.com/vidyalakshmir/SysPartCode/tree/optimizations))
 
-On Ubuntu 22.04 or another host with Linux kernel >= 5.8, a typical setup is:
+On Ubuntu 22.04 or newer with Linux kernel >= 5.8, a typical setup is:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  docker.io sysdig openjdk-17-jdk maven python3 python3-pip \
+  docker.io openjdk-17-jdk maven python3 python3-pyelftools \
   binutils file unzip make g++ gdb lsb-release libreadline-dev libunwind-dev \
   libc6-dbg libstdc++6-12-dbg
-
-python3 -m pip install --user pyelftools
 ```
 
 If your host has a different GCC runtime, replace `libstdc++6-12-dbg` with the matching `libstdc++6-<version>-dbg` package.
+
+Note that `sysdig` is deliberately absent from that list: the distribution
+package is too old and is installed separately below. `pyelftools` comes from
+APT rather than `pip`, because recent Ubuntu releases protect the system Python
+under PEP 668 and `pip install --user pyelftools` fails with
+`error: externally-managed-environment`. Use a virtual environment only if you
+need a newer release than the distribution ships:
+
+```bash
+sudo apt-get install -y python3-venv
+python3 -m venv .venv && source .venv/bin/activate
+python -m pip install pyelftools
+```
+
+Verify either way with `python3 -c "import elftools; print(elftools.__version__)"`.
+
+#### Sysdig
+
+The capture scripts run `sudo sysdig --modern-bpf`. That flag needs Sysdig 0.30
+or newer, while Ubuntu and Debian package much older versions, so installing
+`sysdig` from the distribution repository fails with:
+
+```
+sysdig: unrecognized option '--modern-bpf'
+```
+
+Install the upstream release directly:
+
+```bash
+wget https://github.com/draios/sysdig/releases/download/0.41.4/sysdig-0.41.4-x86_64.deb
+sudo dpkg -i sysdig-0.41.4-x86_64.deb
+sudo apt-get install -f -y
+rm -f sysdig-0.41.4-x86_64.deb
+```
+
+Confirm both the version and the flag:
+
+```bash
+sysdig --version                  # 0.41.4
+sysdig --help | grep modern-bpf   # must print the option
+uname -r                          # must be >= 5.8
+```
+
+Two errors during installation are expected and can be ignored:
+
+```
+modprobe: FATAL: Module scap not found.
+ERROR (dkms apport): kernel package linux-headers-6.14.0-37-generic is not supported
+dpkg: error processing package falcosecurity-scap-dkms (--configure)
+```
+
+Both come from the legacy kernel-module driver. `falcosecurity-scap-dkms` is
+Sysdig's own driver package -- the driver source lives in the falcosecurity/libs
+project, which Sysdig and Falco share -- and it cannot build against recent
+kernels. Modern eBPF is compiled into the `sysdig` binary and needs no kernel
+module, so the failure does not affect the capture. If the failed package leaves
+APT half-configured, clear it with:
+
+```bash
+sudo apt-get remove --purge -y falcosecurity-scap-dkms
+sudo apt-get -f install
+```
+
+Finally, verify that a capture actually produces events, since an unusable
+probe reports no error -- it simply returns nothing:
+
+```bash
+sudo timeout 15 sysdig --modern-bpf --unbuffered 'evt.type=execve' \
+  -p '%evt.time %proc.name %proc.exe' &
+sleep 8; ls /tmp > /dev/null; sleep 8
+```
+
+Lines of output mean the probe is working. If a capture is silently empty
+later, check for leaked processes from an earlier run -- they hold their probes
+and starve new ones:
+
+```bash
+pgrep -af "sysdig --modern-bpf"
+sudo pkill -f "sysdig --modern-bpf"
+```
 
 Clone the repository together with the SysPart submodule:
 
