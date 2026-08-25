@@ -54,7 +54,13 @@ SKIPPED=0
 while IFS= read -r lib; do
     # `|| true` matters: pipefail plus a non-ELF file in the mirror (ld.so.cache
     # is the usual one) would otherwise abort the whole run via set -e.
-    soname="$(readelf -d "$lib" 2>/dev/null | sed -n 's/.*soname *: *\[\(.*\)\].*/\1/p' || true)"
+    #
+    # LC_ALL=C matters just as much: readelf translates its output, and a French
+    # system prints "Bibliotheque soname<U+00A0>: [name]" with a non-breaking
+    # space before the colon. The pattern below expects an ordinary space, finds
+    # nothing, and every library is skipped -- reported as "Created 0 symlink(s),
+    # 0 already present", which reads like a mirror that needs no work.
+    soname="$(LC_ALL=C readelf -d "$lib" 2>/dev/null | sed -n 's/.*soname *: *\[\(.*\)\].*/\1/p' || true)"
     [ -n "$soname" ] || continue
     lib_dir="$(dirname "$lib")"
     lib_base="$(basename "$lib")"
