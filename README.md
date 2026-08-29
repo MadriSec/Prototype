@@ -691,6 +691,52 @@ not found in `allfunctions.txt`, leaving `startfuncs_with_addr.txt` empty.
 
 ---
 
+## MCP
+
+`echotrace_mcp.py` exposes the pipeline over the Model Context Protocol, so a
+coding agent can harden a container without a human driving the shell.
+
+```bash
+claude mcp add echotrace -- python3 /path/to/EchoTrace/echotrace_mcp.py
+```
+
+Three tools:
+
+| Tool | Purpose |
+|------|---------|
+| `analyze_container(container_id, skip_sysdig=False, skip_bytecode=False)` | Run the pipeline against a running container |
+| `generate_profile(syscalls_path, output_path="seccomp.json")` | Build a seccomp profile from a syscall list |
+| `compare_to_docker_default(profile_path)` | Diff the profile against Docker's default |
+
+The stages are separate tools deliberately. A full run takes minutes and needs
+root, and a tool call that blocks that long is unusable; the agent sequences the
+stages itself and uses the skip flags to resume rather than repeat work.
+
+`skip_sysdig=True` reuses the image-scoped capture and extraction directories.
+The current `final_tool.sh` implementation of `skip_bytecode=True` stops after
+native mapping; it does not continue through SysPart or generate a profile. The
+tool returns a `resume_note` when that flag is used so an agent does not mistake
+the partial run for a completed hardening pass.
+
+```
+> harden the tomcat9 container
+
+  analyze_container("tomcat9")
+    -> Final_results/tomcat_9.0.120-jdk8-corretto-al2/.../tomcat_....json
+
+  compare_to_docker_default("Final_results/.../tomcat_....json")
+    -> allowed 158, docker_default 410, reduction_pct 61.5, blocked_by_us 252
+```
+
+Requires FastMCP from MCP SDK 1.x (`python3 -m pip install --user 'mcp<2'`) and, for
+`analyze_container`, the same Docker, sysdig and root access the pipeline needs.
+Verify the wrapper against the pipeline with:
+
+```bash
+python3 echotrace_mcp.py --selfcheck
+```
+
+
 ## Evaluation Results Snapshot
 
 The following snapshot summarizes the JDK 8 container results from the current EchoTrace evaluation. The final syscall allowlist averages **153.8 syscalls** across these ten applications. Compared with the Docker default seccomp policy, which allows approximately **305 syscalls** out of a 360-syscall universe after denying 55, this is about a **49.6% reduction** in the allowed syscall surface.
@@ -747,4 +793,3 @@ The following snapshot summarizes the JDK 8 container results from the current E
 EchoTrace is licensed under the GNU General Public License v3.0. See [`LICENSE`](LICENSE).
 
 The `SysPartCode/` submodule is also GPLv3 and tracks the upstream [SysPartCode optimizations branch](https://github.com/vidyalakshmir/SysPartCode/tree/optimizations). Major third-party components are summarized in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-
