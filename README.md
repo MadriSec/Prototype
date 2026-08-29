@@ -712,6 +712,12 @@ The stages are separate tools deliberately. A full run takes minutes and needs
 root, and a tool call that blocks that long is unusable; the agent sequences the
 stages itself and uses the skip flags to resume rather than repeat work.
 
+`skip_sysdig=True` reuses the image-scoped capture and extraction directories.
+The current `final_tool.sh` implementation of `skip_bytecode=True` stops after
+native mapping; it does not continue through SysPart or generate a profile. The
+tool returns a `resume_note` when that flag is used so an agent does not mistake
+the partial run for a completed hardening pass.
+
 ```
 > harden the tomcat9 container
 
@@ -722,7 +728,7 @@ stages itself and uses the skip flags to resume rather than repeat work.
     -> allowed 158, docker_default 410, reduction_pct 61.5, blocked_by_us 252
 ```
 
-Requires `mcp` (`python3 -m pip install --user mcp`) and, for
+Requires FastMCP from MCP SDK 1.x (`python3 -m pip install --user 'mcp<2'`) and, for
 `analyze_container`, the same Docker, sysdig and root access the pipeline needs.
 Verify the wrapper against the pipeline with:
 
@@ -787,4 +793,3 @@ The following snapshot summarizes the JDK 8 container results from the current E
 EchoTrace is licensed under the GNU General Public License v3.0. See [`LICENSE`](LICENSE).
 
 The `SysPartCode/` submodule is also GPLv3 and tracks the upstream [SysPartCode optimizations branch](https://github.com/vidyalakshmir/SysPartCode/tree/optimizations). Major third-party components are summarized in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
-

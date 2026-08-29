@@ -19,12 +19,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-# mcp 2.x renamed FastMCP to MCPServer; same .tool()/.run() shape. Fall back
-# to the v1 name so this runs against either.
-try:
-    from mcp.server.mcpserver import MCPServer as _Server
-except ImportError:  # mcp < 2
-    from mcp.server.fastmcp import FastMCP as _Server
+from mcp.server.fastmcp import FastMCP
 
 REPO = Path(__file__).resolve().parent
 CACHE = Path.home() / ".cache" / "echotrace"
@@ -35,7 +30,7 @@ DOCKER_DEFAULT_URL = (
 )
 TAIL = 4000  # the pipeline is very chatty; keep it out of the agent's context
 
-mcp = _Server("echotrace")
+mcp = FastMCP("echotrace")
 
 
 def _tail(text: str) -> str:
@@ -140,7 +135,8 @@ def analyze_container(
     resume at a later stage rather than re-running work that is already done.
 
     skip_sysdig:   reuse the existing dynamic capture.
-    skip_bytecode: reuse the existing native_methods.txt.
+    skip_bytecode: reuse the existing native_methods.txt. The current
+                   final_tool.sh stops after native mapping in this mode.
     """
     env = {"SKIP_SYSDIG": "1"} if skip_sysdig else {}
     if skip_bytecode:
@@ -153,13 +149,19 @@ def analyze_container(
         capture_output=True, text=True, cwd=REPO,
         env={**os.environ, **env},
     )
-    return {
+    result = {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
         "skipped": sorted(env),
         "stdout": _tail(proc.stdout),
         "stderr": _tail(proc.stderr),
     }
+    if skip_bytecode:
+        result["resume_note"] = (
+            "final_tool.sh currently exits after native mapping when "
+            "SKIP_BYTECODE_ANALYSIS=1; it does not run SysPart or emit a profile"
+        )
+    return result
 
 
 def _selfcheck() -> int:
@@ -188,4 +190,4 @@ def _selfcheck() -> int:
 if __name__ == "__main__":
     if "--selfcheck" in sys.argv:
         raise SystemExit(_selfcheck())
-    mcp.run()
+    mcp.run(transport="stdio")
